@@ -82,3 +82,21 @@ DSH example notes.
   harness did not send.
 - `off` capture uses the harness session header (`x-deepseek-harness-session-id`)
   so the dataset still groups sessions even without hints.
+
+## DSH runtime setup (verified)
+
+- Node >= 22 (24.22.0 used); @deepseek-ai/dsh@0.1.6-alpha.2.
+- 
+pm install @deepseek-ai/dsh@0.1.6-alpha.2 --ignore-scripts works for headless
+  runs when the native koffi build is not needed.
+- dsh plugin add needs a **Linux** pnpm on PATH (9.15.0 used) and
+  ignore-workspace-root-check=true (profile .npmrc).
+- Install the hint plugin once:
+  dsh plugin --profile capture add /path/to/dsh-agent-hints.
+
+## Dify one-time setup
+
+Dify stores model endpoints in its own DB. Point the app's agent-hints provider
+at the recorder (http://<host>:<port>/v1), then run
+examples/dify_task.py through capture run --listen-port <port>. Switching
+between hints on/off is a provider switch (agent-hints vs plain OpenAI-compatible).
