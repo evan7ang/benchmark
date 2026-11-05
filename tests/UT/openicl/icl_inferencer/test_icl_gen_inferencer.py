@@ -96,6 +96,47 @@ class TestGenInferencer(unittest.TestCase):
 
     @mock.patch("ais_bench.benchmark.openicl.icl_inferencer.icl_base_inferencer.build_model_from_cfg")
     @mock.patch("ais_bench.benchmark.openicl.icl_inferencer.icl_base_inferencer.model_abbr_from_cfg", return_value="mabbr")
+    def test_get_data_list_v2_agent_hint(self, m_abbr, m_build):
+        m_build.return_value = DummyModel()
+        inf = GenInferencer(model_cfg={}, batch_size=1)
+
+        class DummyDatasetV2:
+            def __init__(self):
+                self.test = Dataset.from_dict({
+                    "question": ["q0", "q1"],
+                    "agent_hint": [
+                        {
+                            "session": {"session_id": "s-1", "epoch": 0},
+                            "agent_status": {"state": "running"},
+                        },
+                        {
+                            "session": {"session_id": "s-1", "epoch": 0},
+                            "agent_status": {"state": "finalize"},
+                        },
+                    ],
+                })
+                self.reader = type("R", (), {
+                    "output_column": None,
+                    "dataset": self.test,
+                    "get_max_out_len": lambda self=None: [5, 5],
+                    "get_timestamp": lambda self=None: None,
+                })()
+                self.abbr = "v2"
+
+        class DummyRetrieverV2(DummyRetriever):
+            def __init__(self, dataset):
+                super().__init__(dataset)
+                self.dataset_reader.dataset = dataset.test
+
+        r = DummyRetrieverV2(DummyDatasetV2())
+        data_list = inf.get_data_list(r)
+        self.assertEqual(data_list[0]["session_id"], "s-1")
+        self.assertEqual(data_list[1]["session_id"], "s-1")
+        self.assertEqual(data_list[0]["stage"], "running")
+        self.assertEqual(data_list[1]["stage"], "finalize")
+
+    @mock.patch("ais_bench.benchmark.openicl.icl_inferencer.icl_base_inferencer.build_model_from_cfg")
+    @mock.patch("ais_bench.benchmark.openicl.icl_inferencer.icl_base_inferencer.model_abbr_from_cfg", return_value="mabbr")
     def test_batch_inference_async(self, m_abbr, m_build):
         """测试GenInferencer的batch_inference方法调用model.generate和report_cache_info_sync"""
         m_build.return_value = DummyModel()

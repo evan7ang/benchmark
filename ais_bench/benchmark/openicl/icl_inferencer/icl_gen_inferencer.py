@@ -13,6 +13,12 @@ from ais_bench.benchmark.openicl.icl_retriever import BaseRetriever
 from ais_bench.benchmark.openicl.icl_inferencer.icl_base_api_inferencer import BaseApiInferencer
 from ais_bench.benchmark.openicl.icl_inferencer.icl_base_local_inferencer import BaseLocalInferencer
 from ais_bench.benchmark.openicl.icl_inferencer.output_handler.gen_inferencer_output_handler import GenInferencerOutputHandler
+from ais_bench.benchmark.utils.agent_hint import (
+    agent_hint_perf_metadata,
+    is_v2_agent_hint,
+    lifecycle_state_of,
+    session_id_of,
+)
 
 
 @ICL_INFERENCERS.register_module()
@@ -117,6 +123,7 @@ class GenInferencer(BaseApiInferencer, BaseLocalInferencer):
         output.uuid = uid
         output.data_id = index
         output.session_id = session_id
+        output.extra_perf_data.update(agent_hint_perf_metadata(raw_agent_hint))
 
         # Debug: confirm agent_hint survives up to the generate() call when
         # pass_agent_hint=True (i.e. it is forwarded via **data).
@@ -255,57 +262,64 @@ class GenInferencer(BaseApiInferencer, BaseLocalInferencer):
 
         # ---- attach session_id (top-level column OR agent_hint.session_id) ----
         # Priority: explicit top-level "session_id" column > agent_hint.session_id
-        session_ids = retriever.dataset_reader.get_session_id()
+        get_session_id = getattr(
+            retriever.dataset_reader, "get_session_id", None
+        )
+        session_ids = get_session_id() if callable(get_session_id) else None
+        agent_hints = None
+        if raw_test is not None and len(raw_test) > 0 and \
+                "agent_hint" in raw_test.column_names:
+            try:
+                agent_hints = raw_test["agent_hint"]
+            except Exception as e:
+                self.logger.warning(
+                    f"[session-aware] failed to read agent_hint column: {e}"
+                )
         if session_ids is not None:
             for index, sid in enumerate(session_ids):
                 data_list[index]["session_id"] = str(sid) if sid is not None else ""
-        elif raw_test is not None and len(raw_test) > 0 and \
-                "agent_hint" in raw_test.column_names:
-            # Auto-extract session_id from nested agent_hint.session_id
-            try:
-                agent_hints = raw_test["agent_hint"]
-                for index, ah in enumerate(agent_hints):
-                    if index >= len(data_list):
-                        break
-                    sid = ""
-                    if isinstance(ah, dict):
-                        sid = ah.get("session_id") or ""
-                    data_list[index]["session_id"] = str(sid)
-                self.logger.info(
-                    "[session-aware] auto-extracted session_id from agent_hint.session_id"
-                )
-            except Exception as e:
-                self.logger.warning(
-                    f"[session-aware] failed to extract session_id from agent_hint: {e}"
-                )
+        elif agent_hints is not None:
+            for index, ah in enumerate(agent_hints):
+                if index >= len(data_list):
+                    break
+                data_list[index]["session_id"] = session_id_of(ah)
+            self.logger.info(
+                "[session-aware] auto-extracted session_id from agent_hint"
+            )
         else:
             # No session info at all -> fall back to per-request (blank session)
             for index in range(len(data_list)):
                 data_list[index]["session_id"] = ""
 
-        # ---- attach stage (top-level column OR agent_hint.stage) ----
+        # ---- attach stage (top-level column OR agent_hint lifecycle) ----
         # stage marks a request's position within its session:
-        #   start / stage-N / end. It drives session end-of-life decisions in
-        # the session-aware worker loop (a session ends at stage=end).
+        #   start / stage-N / end for legacy; running/pause/resume/finalize for v2.
         stages = None
         if raw_test is not None and len(raw_test) > 0:
             if "stage" in raw_test.column_names:
                 stages = raw_test["stage"]
-            elif "agent_hint" in raw_test.column_names:
-                try:
-                    agent_hints = raw_test["agent_hint"]
-                    stages = [
-                        (ah.get("stage") if isinstance(ah, dict) else None)
-                        for ah in agent_hints
-                    ]
-                except Exception:
-                    stages = None
+            elif agent_hints is not None:
+                stages = [lifecycle_state_of(ah) for ah in agent_hints]
         if stages is not None:
             for index, st in enumerate(stages):
                 if index < len(data_list):
                     data_list[index]["stage"] = str(st) if st is not None else ""
 
-        # Validate per-session start/end marking (non-fatal; warn only).
+        has_v2 = (
+            any(is_v2_agent_hint(ah) for ah in agent_hints)
+            if agent_hints is not None
+            else False
+        )
+        if "stage" in (raw_test.column_names if raw_test is not None else []):
+            has_v2 = has_v2 or any(
+                is_v2_agent_hint(sample.get("agent_hint"))
+                for sample in data_list
+            )
+        if not has_v2:
+            self._validate_legacy_session_stages(data_list)
+        return data_list
+
+    def _validate_legacy_session_stages(self, data_list: List[dict]) -> None:
         session_stage_map: Dict[str, List[str]] = {}
         for sample in data_list:
             sid = sample.get("session_id", "")
@@ -313,7 +327,6 @@ class GenInferencer(BaseApiInferencer, BaseLocalInferencer):
         for sid, stages_of_sid in session_stage_map.items():
             if not stages_of_sid:
                 continue
-            # Filter empty stages (missing markers) for inspection.
             meaningful = [s for s in stages_of_sid if s]
             if not meaningful:
                 self.logger.warning(
@@ -333,4 +346,3 @@ class GenInferencer(BaseApiInferencer, BaseLocalInferencer):
                     f"[session-aware] session '{sid}' last meaningful stage is "
                     f"'{last}', expected 'end'."
                 )
-        return data_list

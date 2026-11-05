@@ -145,6 +145,7 @@ class EmptyTask(BaseTask):
 class TaskStateManager:
     def __init__(self, tmp_path: str, task_name: str, is_debug: bool, refresh_interval: int = 0.5):
         self.logger = AISLogger()
+        os.makedirs(tmp_path, exist_ok=True)
         self.tmp_file = os.path.join(tmp_path, f"tmp_{task_name.replace('/', '_')}.json")
         if os.path.exists(self.tmp_file):
             os.remove(self.tmp_file)

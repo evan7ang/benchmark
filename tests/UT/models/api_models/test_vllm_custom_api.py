@@ -1,5 +1,6 @@
 import unittest
 import asyncio
+import base64
 import json
 import os
 import tempfile
@@ -485,6 +486,126 @@ class TestVLLMCustomAPILora(unittest.TestCase):
         self.assertEqual(body["model"], "base-model-name")
         self.assertNotIn("adapter_id", body)
 
+    def test_agent_hint_header_transport(self):
+        kwargs = self.default_kwargs.copy()
+        kwargs["agent_hint_transport"] = "header"
+        model = VLLMCustomAPI(**kwargs)
+        output = Output()
+        hint = {
+            "session": {"session_id": "s-1", "epoch": 1},
+            "agent_status": {"state": "resume"},
+            "cache_control": {"type": None, "ttl_s": None},
+        }
+        body = asyncio.run(
+            model.get_request_body("prompt", 8, output, agent_hint=hint)
+        )
+        self.assertNotIn("agent_hint", body)
+        self.assertIn("X-Agent-Hint", output.request_headers)
+        encoded = output.request_headers["X-Agent-Hint"]
+        padded = encoded + "=" * (-len(encoded) % 4)
+        decoded = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
+        self.assertEqual(decoded["session"]["session_id"], "s-1")
+        self.assertEqual(decoded["agent_status"]["state"], "running")
+        self.assertNotIn("cache_control", decoded)
+
+    def test_agent_hint_body_transport_keeps_body_field(self):
+        model = VLLMCustomAPI(**self.default_kwargs)
+        output = Output()
+        hint = {"session": {"session_id": "s-1"}}
+        body = asyncio.run(
+            model.get_request_body("prompt", 8, output, agent_hint=hint)
+        )
+        self.assertEqual(body["agent_hint"], hint)
+        self.assertNotIn("X-Agent-Hint", output.request_headers)
+
+    def test_agent_hint_none_transport_drops_field(self):
+        kwargs = self.default_kwargs.copy()
+        kwargs["agent_hint_transport"] = "none"
+        model = VLLMCustomAPI(**kwargs)
+        output = Output()
+        body = asyncio.run(
+            model.get_request_body(
+                "prompt", 8, output, agent_hint={"session": {"session_id": "s-1"}}
+            )
+        )
+        self.assertNotIn("agent_hint", body)
+        self.assertNotIn("X-Agent-Hint", output.request_headers)
+
+    def test_agent_hint_transport_validation(self):
+        kwargs = self.default_kwargs.copy()
+        kwargs["agent_hint_transport"] = "invalid"
+        with self.assertRaises(ValueError):
+            VLLMCustomAPI(**kwargs)
+
+    def test_extra_headers_and_agent_status_url(self):
+        kwargs = self.default_kwargs.copy()
+        kwargs["extra_headers"] = {"X-Strict-Priority-Token": "token"}
+        model = VLLMCustomAPI(**kwargs)
+        self.assertEqual(
+            model.headers["X-Strict-Priority-Token"], "token"
+        )
+        self.assertEqual(
+            model.get_agent_status_url(),
+            model.base_url + "agent-status",
+        )
+        self.assertEqual(model.agent_status_report, False)
+
+    def test_agent_status_report_config(self):
+        kwargs = self.default_kwargs.copy()
+        kwargs["agent_status_report"] = True
+        kwargs["agent_status_url"] = "/custom-agent-status"
+        model = VLLMCustomAPI(**kwargs)
+        self.assertTrue(model.agent_status_report)
+        self.assertEqual(
+            model.get_agent_status_url(),
+            model.base_url + "custom-agent-status",
+        )
+
+
+    def test_json_extra_fields_parse_strings(self):
+        kwargs = self.default_kwargs.copy()
+        kwargs["json_extra_fields"] = ["messages", "tools"]
+        model = VLLMCustomAPI(**kwargs)
+        output = Output()
+        messages = [{"role": "user", "content": "hi"}]
+        tools = [{"type": "function", "function": {"name": "f"}}]
+        body = asyncio.run(
+            model.get_request_body(
+                "prompt",
+                8,
+                output,
+                messages=json.dumps(messages),
+                tools=json.dumps(tools),
+            )
+        )
+        self.assertEqual(body["messages"], messages)
+        self.assertEqual(body["tools"], tools)
+
+    def test_json_extra_fields_drop_empty_tools(self):
+        kwargs = self.default_kwargs.copy()
+        kwargs["json_extra_fields"] = ["tools"]
+        model = VLLMCustomAPI(**kwargs)
+        for value in (None, "[]"):
+            output = Output()
+            body = asyncio.run(
+                model.get_request_body("prompt", 8, output, tools=value)
+            )
+            self.assertNotIn("tools", body)
+
+    def test_drop_none_extra_fields(self):
+        kwargs = self.default_kwargs.copy()
+        kwargs["drop_none_extra_fields"] = ["tool_choice"]
+        model = VLLMCustomAPI(**kwargs)
+        output = Output()
+        body = asyncio.run(
+            model.get_request_body("prompt", 8, output, tool_choice=None)
+        )
+        self.assertNotIn("tool_choice", body)
+        output = Output()
+        body = asyncio.run(
+            model.get_request_body("prompt", 8, output, tool_choice="auto")
+        )
+        self.assertEqual(body["tool_choice"], "auto")
 
 
 if __name__ == "__main__":

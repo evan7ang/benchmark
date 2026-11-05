@@ -349,6 +349,38 @@ class TestBaseAPIModel(unittest.TestCase):
         # 这里主要是测试基类的行为
         pass
 
+    def test_generate_merges_request_headers(self):
+        kwargs = self.default_kwargs.copy()
+        kwargs["stream"] = True
+        kwargs["extra_headers"] = {"X-Static": "static"}
+        model = self.model_class(**kwargs)
+        output = Output()
+        output.request_headers = {"X-Agent-Hint": "encoded"}
+        model.stream_infer = mock.AsyncMock()
+
+        async def run():
+            await model.generate("prompt", 8, output, session=mock.MagicMock())
+
+        asyncio.run(run())
+        headers = model.stream_infer.call_args.kwargs["headers"]
+        self.assertEqual(headers["X-Static"], "static")
+        self.assertEqual(headers["X-Agent-Hint"], "encoded")
+        self.assertEqual(headers["Content-Type"], "application/json")
+
+    def test_get_agent_status_url(self):
+        model = self.model_class(**self.default_kwargs)
+        self.assertEqual(
+            model.get_agent_status_url(),
+            "http://127.0.0.1:8000/agent-status",
+        )
+        kwargs = self.default_kwargs.copy()
+        kwargs["agent_status_url"] = "https://example.com/agent-status"
+        model = self.model_class(**kwargs)
+        self.assertEqual(
+            model.get_agent_status_url(),
+            "https://example.com/agent-status",
+        )
+
 
 class TestAPITemplateParser(unittest.TestCase):
     def setUp(self):

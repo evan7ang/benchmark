@@ -87,6 +87,9 @@ class BaseAPIModel(BaseModel):
         enable_ssl: bool = False,
         verbose: bool = False,
         api_key: str = "",
+        extra_headers: Optional[Dict[str, str]] = None,
+        agent_status_report: bool = False,
+        agent_status_url: str = "",
     ):
         if not BaseAPIModel.init_flag:
             self.logger = MockAISLogger()
@@ -98,6 +101,10 @@ class BaseAPIModel(BaseModel):
         self.max_out_len = max_out_len
         self.retry = retry
         self.headers = {"Content-Type": "application/json"}
+        self.extra_headers = dict(extra_headers or {})
+        self.headers.update({str(k): str(v) for k, v in self.extra_headers.items()})
+        self.agent_status_report = bool(agent_status_report)
+        self.agent_status_url = agent_status_url or ""
         self.meta_template = meta_template if meta_template else None
         self.host_ip = host_ip
         self.host_port = host_port
@@ -147,6 +154,38 @@ class BaseAPIModel(BaseModel):
             pass
         base_url = f"{protocol}://{host}:{self.host_port}/"
         return base_url
+
+    def get_agent_status_url(self) -> str:
+        custom_url = (
+            self.agent_status_url.strip()
+            if isinstance(self.agent_status_url, str)
+            else ""
+        )
+        if custom_url:
+            if custom_url.startswith(("http://", "https://")):
+                return custom_url
+            return urllib.parse.urljoin(self.base_url, custom_url.lstrip("/"))
+        return urllib.parse.urljoin(self.base_url, "agent-status")
+
+    async def post_agent_status(
+        self, payload: Dict, session: aiohttp.ClientSession = None
+    ) -> Tuple[int, str]:
+        url = self.get_agent_status_url()
+        headers = dict(self.headers)
+        close_session = False
+        if session is None:
+            session = aiohttp.ClientSession(trust_env=True)
+            close_session = True
+        try:
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with session.post(
+                url=url, json=payload, headers=headers, timeout=timeout
+            ) as response:
+                text = await response.text()
+                return response.status, text
+        finally:
+            if close_session:
+                await session.close()
 
     def _get_service_model_path(self) -> str:
         try:
@@ -245,14 +284,15 @@ class BaseAPIModel(BaseModel):
         request_body = await self.get_request_body(
             input_data, max_out_len, output, **args
         )
+        headers = {**self.headers, **getattr(output, "request_headers", {})}
         self.logger.debug(f"Request body: {request_body}")
         retry_count = 0
         for _ in range(self.retry):
             try:
                 if self.stream:
-                    await self.stream_infer(request_body, output)
+                    await self.stream_infer(request_body, output, headers=headers)
                 else:
-                    await self.text_infer(request_body, output)
+                    await self.text_infer(request_body, output, headers=headers)
                 # break retry loop when request is successful
                 break
             except asyncio.exceptions.CancelledError as e:
@@ -279,10 +319,17 @@ class BaseAPIModel(BaseModel):
             await self.session.close()
         return output
 
-    async def stream_infer(self, request_body: dict, output: Output):
+    async def stream_infer(
+        self,
+        request_body: dict,
+        output: Output,
+        headers: Optional[Dict[str, str]] = None,
+    ):
         await output.record_time_point()
         async with self.session.post(
-            url=self.url, json=request_body, headers=self.headers
+            url=self.url,
+            json=request_body,
+            headers=headers if headers is not None else self.headers,
         ) as response:
             if response.status == 200:
                 async for raw_chunk in self.iter_lines(response.content):
@@ -311,10 +358,17 @@ class BaseAPIModel(BaseModel):
                 output.error_info = response.reason
                 output.success = False
 
-    async def text_infer(self, request_body, output: Output):
+    async def text_infer(
+        self,
+        request_body,
+        output: Output,
+        headers: Optional[Dict[str, str]] = None,
+    ):
         await output.record_time_point()
         async with self.session.post(
-            url=self.url, json=request_body, headers=self.headers
+            url=self.url,
+            json=request_body,
+            headers=headers if headers is not None else self.headers,
         ) as response:
             if response.status == 200:
                 raw_data = await response.text()

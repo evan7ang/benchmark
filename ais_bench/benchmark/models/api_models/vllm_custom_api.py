@@ -1,13 +1,20 @@
 import json
 import os
 import urllib
-from typing import Dict, Optional, Union
+from typing import Dict, List, Optional, Union
 from ais_bench.benchmark.registry import MODELS
 from ais_bench.benchmark.utils.prompt import PromptList
 
 from ais_bench.benchmark.models import BaseAPIModel, LMTemplateParser
 from ais_bench.benchmark.models.output import Output
 from ais_bench.benchmark.openicl.icl_inferencer.output_handler.ppl_inferencer_output_handler import PPLRequestOutput
+from ais_bench.benchmark.utils.agent_hint import (
+    HEADER_NAME,
+    MAX_HEADER_CHARS,
+    encode_agent_hint_header,
+    lifecycle_state_of,
+    session_id_of,
+)
 
 PromptType = Union[PromptList, str]
 
@@ -57,6 +64,12 @@ class VLLMCustomAPI(BaseAPIModel):
         enable_ssl: bool = False,
         verbose: bool = False,
         use_chat_api: bool = False,
+        agent_hint_transport: str = "body",
+        extra_headers: Optional[Dict[str, str]] = None,
+        agent_status_report: bool = False,
+        agent_status_url: str = "",
+        json_extra_fields: Optional[List[str]] = None,
+        drop_none_extra_fields: Optional[List[str]] = None,
     ):
         super().__init__(
             path=path,
@@ -71,7 +84,18 @@ class VLLMCustomAPI(BaseAPIModel):
             meta_template=meta_template,
             enable_ssl=enable_ssl,
             verbose=verbose,
+            extra_headers=extra_headers,
+            agent_status_report=agent_status_report,
+            agent_status_url=agent_status_url,
         )
+        if agent_hint_transport not in ("body", "header", "none"):
+            raise ValueError(
+                "agent_hint_transport must be one of 'body', 'header', 'none', "
+                f"got {agent_hint_transport!r}"
+            )
+        self.agent_hint_transport = agent_hint_transport
+        self.json_extra_fields = list(json_extra_fields or [])
+        self.drop_none_extra_fields = list(drop_none_extra_fields or [])
         self.use_chat_api = use_chat_api
         if api_key:
             self.headers["Authorization"] = f"Bearer {api_key}"
@@ -153,12 +177,56 @@ class VLLMCustomAPI(BaseAPIModel):
         # single sample's additional metadata is forwarded to the API. These
         # arrive via **data from GenInferencer.do_request and **args here.
         # session_id is consumed by concurrency control and popped upstream.
+        for field in self.drop_none_extra_fields:
+            if field in args and args[field] is None:
+                args.pop(field, None)
+        for field in self.json_extra_fields:
+            if field not in args:
+                continue
+            value = args[field]
+            if value is None or value == "":
+                args.pop(field, None)
+                continue
+            if isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except json.JSONDecodeError:
+                    self.logger.warning(
+                        f"[agent_hint][json-field] data_id="
+                        f"{getattr(output, 'data_id', None)} field={field} "
+                        "is not valid JSON, dropping it"
+                    )
+                    args.pop(field, None)
+                    continue
+                args[field] = value
+            if field == "tools" and value == []:
+                args.pop(field, None)
+        agent_hint = None
+        if self.agent_hint_transport in ("header", "none"):
+            agent_hint = args.pop("agent_hint", None)
         request_body = request_body | args
         if self.stream:
             request_body["stream_options"] = {"include_usage": True}
-        # Debug: confirm per-sample extra fields (e.g. agent_hint) reached the
-        # request body that will be sent to the API.
-        if "agent_hint" in request_body:
+        if agent_hint is not None and self.agent_hint_transport == "header":
+            header_value = encode_agent_hint_header(agent_hint)
+            output.request_headers[HEADER_NAME] = header_value
+            if len(header_value) > MAX_HEADER_CHARS:
+                self.logger.warning(
+                    f"[agent_hint][send-header] encoded header is "
+                    f"{len(header_value)} chars, exceeding {MAX_HEADER_CHARS}"
+                )
+            self.logger.info(
+                f"[agent_hint][send-header] data_id={getattr(output, 'data_id', None)} "
+                f"session_id={session_id_of(agent_hint)} "
+                f"state={lifecycle_state_of(agent_hint)} "
+                f"header_len={len(header_value)}"
+            )
+        elif agent_hint is not None and self.agent_hint_transport == "none":
+            self.logger.debug(
+                f"[agent_hint][drop] data_id={getattr(output, 'data_id', None)} "
+                f"session_id={session_id_of(agent_hint)}"
+            )
+        elif "agent_hint" in request_body:
             self.logger.info(
                 f"[agent_hint][send] data_id={getattr(output, 'data_id', None)} "
                 f"session_id={getattr(output, 'session_id', '')} "

@@ -26,6 +26,12 @@ from ais_bench.benchmark.openicl.icl_inferencer.icl_base_inferencer import BaseI
 from ais_bench.benchmark.utils.logging.error_codes import ICLI_CODES
 from ais_bench.benchmark.utils.logging.exceptions import AISBenchImplementationError, ParameterValueError, AISBenchRuntimeError
 from ais_bench.benchmark.utils.logging.logger import AISLogger
+from ais_bench.benchmark.utils.agent_hint import (
+    is_v2_agent_hint,
+    lifecycle_state_of,
+    session_id_of,
+    epoch_of,
+)
 
 BLOCK_INTERVAL = 0.005  # Avoid request burst accumulation when RR is not configured
 DEFAULT_SAVE_EVERY_FACTOR = 0.1 # default save every factor is 0.1 of batch size
@@ -560,21 +566,101 @@ class BaseApiInferencer(BaseInferencer):
         return False
 
     @staticmethod
-    def _data_is_end(data: Any) -> bool:
-        """Return True if data carries a stage field equal to 'end' (case-insensitive).
-
-        This signals that the current request is the final one in its session
-        span; the worker should stop consuming after sending it so its exec
-        slot is freed immediately for another session.
-        """
+    def _data_lifecycle_state(data: Any) -> str:
         if not isinstance(data, dict):
-            return False
+            return ""
+        hint = data.get("agent_hint") or {}
+        state = lifecycle_state_of(hint)
+        if state:
+            return state
         stage = data.get("stage")
-        return isinstance(stage, str) and stage.lower() == "end"
+        return str(stage) if stage is not None else ""
+
+    @classmethod
+    def _data_is_end(cls, data: Any) -> bool:
+        """Return True for legacy stage=end or v2 agent_status.state=finalize."""
+        state = cls._data_lifecycle_state(data)
+        return state.lower() in ("end", "finalize")
+
+    @classmethod
+    def _data_is_pause(cls, data: Any) -> bool:
+        state = cls._data_lifecycle_state(data)
+        return state.lower() in ("pause", "suspend")
+
+    @classmethod
+    def _data_is_resume(cls, data: Any) -> bool:
+        state = cls._data_lifecycle_state(data)
+        return state.lower() == "resume"
+
+    @staticmethod
+    def _session_group_key(data: Any) -> str:
+        if not isinstance(data, dict):
+            return "default"
+        hint = data.get("agent_hint") or {}
+        if is_v2_agent_hint(hint):
+            session_id = session_id_of(hint)
+            if session_id:
+                return session_id
+            return data.get("session_id", "") or "default"
+        return (
+            hint.get("parent_session_id")
+            or data.get("parent_session_id", "")
+            or data.get("session_id", "")
+            or "default"
+        )
 
     @staticmethod
     def _task_queue_has_real_data(q: "asyncio.Queue"):
         return q.qsize() > 1  # 1 means the last data(None) of each queue.
+
+    async def _report_agent_status(self, session, data: dict, state: str) -> None:
+        if not getattr(self, "pass_agent_hint", False):
+            return
+        model = getattr(self, "model", None)
+        if model is None or not getattr(model, "agent_status_report", False):
+            return
+        if getattr(model, "agent_hint_transport", "body") != "header":
+            return
+        hint = data.get("agent_hint") or {}
+        session_id = session_id_of(hint) or data.get("session_id", "")
+        if not session_id:
+            return
+        wire_state = str(state).lower()
+        if wire_state == "resume":
+            wire_state = "running"
+        elif wire_state == "start":
+            wire_state = "running"
+        elif wire_state == "end":
+            wire_state = "finalize"
+        if wire_state not in ("running", "tool", "pause", "suspend", "finalize"):
+            return
+        payload = {
+            "session": {"session_id": session_id},
+            "agent_status": {"state": wire_state},
+        }
+        epoch = epoch_of(hint)
+        if epoch is not None:
+            payload["session"]["epoch"] = epoch
+        reporter = getattr(model, "post_agent_status", None)
+        if reporter is None:
+            return
+        try:
+            status, text = await reporter(payload, session=session)
+            if status >= 400:
+                self.logger.warning(
+                    f"[agent_hint][agent-status] session_id={session_id} "
+                    f"state={wire_state} failed status={status} response={text[:200]}"
+                )
+            else:
+                self.logger.info(
+                    f"[agent_hint][agent-status] session_id={session_id} "
+                    f"state={wire_state} status={status} response={text[:200]}"
+                )
+        except Exception as e:
+            self.logger.warning(
+                f"[agent_hint][agent-status] session_id={session_id} "
+                f"state={wire_state} failed: {e}"
+            )
 
     async def _session_aware_worker_loop(
         self,
@@ -679,8 +765,8 @@ class BaseApiInferencer(BaseInferencer):
             arrivals to it; a brand-new session_worker task is submitted (and
             appended to ``session_tasks``) to process the remaining data.
             """
-            saw_end = False
-            split = False  # whether create a new task (and a new queue) for the remain datas of current queue.
+            split = False
+            split_reason = ""
             async with session_sem:
                 self.logger.info(f"[session-aware] session {psid} acquired exec slot, work queue len is {q.qsize()}")
                 while not stop_event.is_set():
@@ -688,21 +774,22 @@ class BaseApiInferencer(BaseInferencer):
                     if data is None:  # sentinel from dispatcher (only at end of all data)
                         break
 
-                    # Offload split: hand the rest of this session to a new task.
-                    if self._task_queue_has_real_data(q):
-                        if self._data_has_offload_edit(data):
-                            self.logger.info(
-                                f"[session-aware] session {psid} detect offload edit."
-                            )
-                            split = True
-                            create_new_task(psid, q)
-                        elif self._data_is_end(data):
-                            self.logger.info(
-                                f"[session-aware] session {psid} detect end data. "
-                            )
-                            split = True
-                            create_new_task(psid, q)
-                            break
+                    hint = data.get("agent_hint") or {}
+                    is_v2 = is_v2_agent_hint(hint)
+                    state = self._data_lifecycle_state(data)
+                    if is_v2 and self._data_is_resume(data):
+                        await self._report_agent_status(session, data, "running")
+
+                    is_offload = self._data_has_offload_edit(data)
+                    is_pause = self._data_is_pause(data)
+                    is_end = self._data_is_end(data)
+                    split = is_offload or is_pause or is_end
+                    if is_offload:
+                        split_reason = "offload edit"
+                    elif is_pause:
+                        split_reason = f"pause state={state}"
+                    elif is_end:
+                        split_reason = f"end/finalize state={state}"
 
                     # Optional global RPS limiter (shared across sessions)
                     if token_bucket is not None:
@@ -714,25 +801,33 @@ class BaseApiInferencer(BaseInferencer):
                     try:
                         self.logger.info(
                             f"[session-aware] session {psid} START request "
-                            f"stage={data.get('stage', '?')} data_id={data.get('index', '?')} "
+                            f"stage={state or '?'} data_id={data.get('index', '?')} "
                         )
                         await self.do_request(data, token_bucket, session)
                         self.logger.info(
                             f"[session-aware] session {psid} END   request "
-                            f"stage={data.get('stage', '?')} data_id={data.get('index', '?')}"
+                            f"stage={state or '?'} data_id={data.get('index', '?')}"
                         )
                     except asyncio.CancelledError:
                         raise
                     except Exception as e:
                         self.logger.info(f"[session-aware] session {psid} request failed: {e}")
 
+                    if is_v2 and state.lower() in ("pause", "suspend", "finalize", "tool"):
+                        await self._report_agent_status(session, data, state)
+
                     if split:
-                        # Offload request sent: current span is done. Stop
-                        # consuming and submit a new task for the remaining data.
-                        self.logger.info(
-                            f"[session-aware] session {psid} interrupted after offload, "
-                            f"submitting new task for remaining data"
-                        )
+                        if self._task_queue_has_real_data(q):
+                            create_new_task(psid, q)
+                            self.logger.info(
+                                f"[session-aware] session {psid} interrupted after "
+                                f"{split_reason}, remaining data handed to a new task"
+                            )
+                        else:
+                            self.logger.info(
+                                f"[session-aware] session {psid} interrupted after "
+                                f"{split_reason}, no remaining data"
+                            )
                         break
 
                 # session finished.
@@ -776,8 +871,7 @@ class BaseApiInferencer(BaseInferencer):
                 data = await self.wait_get_data(async_queue, stop_event)
                 if data is None:
                     break
-                agent_hint = data.get("agent_hint") or {}
-                psid = agent_hint.get("parent_session_id") or data.get("parent_session_id", "") or "default"
+                psid = self._session_group_key(data)
                 if psid not in session_queues:
                     q = asyncio.Queue()
                     session_queues[psid] = q

@@ -11,3 +11,4 @@ ais_bench_benchmark.egg-info
 ais_bench/datasets/**
 !ais_bench/datasets/**/
 !ais_bench/datasets/**/*.py
+!ais_bench/datasets/agent/example_v2.jsonl

@@ -29,6 +29,7 @@ class Output:
         # Session identifier for session-aware concurrency mode. Empty in non-session mode.
         # Set by GenInferencer.do_request from data["session_id"].
         self.session_id: str = ""
+        self.request_headers: dict = {}
 
     @abstractmethod
     def get_metrics(self) -> dict:
@@ -148,7 +149,7 @@ class RequestOutput(Output):
         """
 
         def clean_result(res):
-            for key in ["content", "reasoning_content", "perf_mode"]:
+            for key in ["content", "reasoning_content", "perf_mode", "request_headers"]:
                 res.pop(key, None)
             return res
 
