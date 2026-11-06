@@ -147,3 +147,18 @@ Notes:
   serving-side dataset without hints. A true harness-without-plugin run can use
   the `llm-pi-ai` route with `reasoningEfforts: false`.
 - Unit tests: `pytest ais_bench/capture/tests`.
+
+## Dify with agent-hints 0.1.7 + hint service
+
+- The plugin (0.1.7) emits `session` / `priority` / `cache_control` /
+  `agent_status` natively. Older deployments (0.1.4) do **not** emit
+  `agent_status`; upgrade the Dify plugin to 0.1.7.
+- `agent_type` / `prediction` / `call_index` come from the hint service:
+  - compute each LLM node's prefix (sha256 of the first static system message,
+    first 16 chars; `integrations/dify/dsl.py`),
+  - `POST {hint_service}/v1/hints` with static entries per prefix,
+  - run the workflow with the companion driver, which binds the run id and
+    lifecycle state (`POST /v1/bindings`).
+- Example: `examples/dify_hint_service.py` (env-driven).
+- The app's agent-hints provider endpoint must point at the recorder
+  (`hint-mock-model` -> `http://hint-mock:9999/v1`).
