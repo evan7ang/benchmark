@@ -31,6 +31,7 @@ def cmd_to_model_io(args) -> int:
     ns = argparse.Namespace(
         input=args.input, out=args.out, hints=args.hints,
         case_id=args.case_id, session_id=args.session_id,
+        status_events=args.status_events,
     )
     return model_io_convert(ns)
 
@@ -105,7 +106,7 @@ def cmd_batch(args) -> int:
 
 
 def cmd_validate(args) -> int:
-    return validate_dataset(args.dataset, args.hints)
+    return validate_dataset(args.dataset, args.hints, getattr(args, "require_finalize", False))
 
 
 def main() -> int:
@@ -128,6 +129,7 @@ def main() -> int:
     p.add_argument("--hints", choices=["on", "off"], default="on")
     p.add_argument("--case-id", default=None)
     p.add_argument("--session-id", default=None)
+    p.add_argument("--status-events", default=None)
     p.set_defaults(func=cmd_to_model_io)
 
     p = sub.add_parser("run", help="start recorder, run a harness command, persist model_io")
@@ -185,6 +187,7 @@ def main() -> int:
     p = sub.add_parser("validate", help="validate a captured Agent Hint v2 dataset")
     p.add_argument("--dataset", required=True)
     p.add_argument("--hints", choices=["on", "off"], default="on")
+    p.add_argument("--require-finalize", action="store_true")
     p.set_defaults(func=cmd_validate)
 
     args = ap.parse_args()

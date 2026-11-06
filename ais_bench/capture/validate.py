@@ -9,9 +9,10 @@ import sys
 from collections import defaultdict
 
 
-def validate(path: str, hints: str) -> int:
+def validate(path: str, hints: str, require_finalize: bool = False) -> int:
     errors, warnings = [], []
     rows = 0
+    finalize = 0
     sessions = defaultdict(list)
     coverage = {"priority": 0, "cache_control": 0, "prediction": 0,
                 "agent_status": 0, "agent_type": 0, "call_index": 0}
@@ -52,6 +53,8 @@ def validate(path: str, hints: str) -> int:
             errors.append(f"line {lineno}: missing agent_hint.session.session_id")
             continue
         sessions[sid].append(r)
+        if str((hint.get("agent_status") or {}).get("state", "")).lower() == "finalize":
+            finalize += 1
         for k in coverage:
             if hint.get(k) or (k == "agent_type" and sess.get("agent_type")) or (k == "call_index" and sess.get("call_index") is not None):
                 coverage[k] += 1
@@ -70,11 +73,14 @@ def validate(path: str, hints: str) -> int:
         idx = [i for i in idx if isinstance(i, int)]
         if idx and any(b < a for a, b in zip(idx, idx[1:])):
             warnings.append(f"session {sid}: call_index not monotonic")
+    if require_finalize and finalize == 0:
+        errors.append("require_finalize=True but no agent_status.state=finalize record")
     report = {
         "dataset": path,
         "hints": hints,
         "rows": rows,
         "sessions": len(sessions),
+        "finalize_requests": finalize,
         "hint_field_coverage": coverage,
         "max_out_len": {"min": min(max_out) if max_out else 0,
                         "median": statistics.median(max_out) if max_out else 0,
@@ -91,8 +97,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="validate a captured Agent Hint v2 dataset")
     ap.add_argument("--dataset", required=True)
     ap.add_argument("--hints", choices=["on", "off"], default="on")
+    ap.add_argument("--require-finalize", action="store_true")
     args = ap.parse_args()
-    return validate(args.dataset, args.hints)
+    return validate(args.dataset, args.hints, args.require_finalize)
 
 
 if __name__ == "__main__":

@@ -2,28 +2,48 @@
 """Convert captured chat-completions requests into model_io-style JSON files.
 
 Hints ON keeps only requests that actually carried a real X-Agent-Hint
-(auxiliary session-title/compaction calls are excluded: the v2 header protocol
-would otherwise synthesize a hint the harness never sent). Hints OFF keeps all
+(auxiliary session-title/compaction calls are excluded). Hints OFF keeps all
 inference calls and groups them by the harness session header.
 
-Output matches the fields consumed by
-``build_agent_dataset_v2_from_model_io.py``.
+When a harness status sink (out-of-band agent_status events) is supplied, the
+last event of each session is applied to that session's last captured request,
+so `finalize` is not lost. The sink is copied next to the output as
+`status_events.jsonl` and recorded in the report.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import shutil
 import sys
+
+
+def _load_status(path: str):
+    events = []
+    if not path or not os.path.exists(path):
+        return events
+    for line in open(path, encoding="utf-8"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        sid = ((d.get("session") or {}).get("session_id"))
+        st = d.get("agent_status")
+        if sid and isinstance(st, dict):
+            events.append((sid, st))
+    return events
 
 
 def convert(args) -> int:
     os.makedirs(args.out, exist_ok=True)
-    seq = 0
-    kept = 0
+    rows = []
     skipped = 0
     skipped_no_hint = 0
-    sessions = set()
+    seq = 0
     case_id = args.case_id
     with open(args.input, encoding="utf-8") as f:
         for line in f:
@@ -74,8 +94,6 @@ def convert(args) -> int:
                 if key in body:
                     request[key] = body[key]
             if args.hints == "on":
-                # Preserve the full captured AgentHint (nested session,
-                # priority, cache_control, prediction, agent_status).
                 full_hint = dict(hint) if isinstance(hint, dict) else {}
                 sess = full_hint.setdefault("session", {})
                 sess.setdefault("session_id", sid)
@@ -98,22 +116,50 @@ def convert(args) -> int:
                           "total_tokens": prompt_tokens + completion_tokens},
                 "request": request,
             }
-            path = os.path.join(args.out, f"capture_{seq:06d}.json")
-            with open(path, "w", encoding="utf-8") as out:
-                json.dump(record, out, ensure_ascii=False, separators=(",", ":"))
-            kept += 1
-            sessions.add(sid)
+            rows.append((sid, record))
+
+    status_events = _load_status(getattr(args, "status_events", None))
+    if status_events:
+        shutil.copyfile(args.status_events, os.path.join(args.out, "status_events.jsonl"))
+    last_state = {}
+    for sid, st in status_events:
+        last_state[sid] = st  # file order: last event wins
+    last_row = {sid: i for i, (sid, _) in enumerate(rows)}
+    finalize_applied = 0
+    for sid, st in last_state.items():
+        idx = last_row.get(sid)
+        if idx is None:
+            continue
+        record = rows[idx][1]
+        request = record.setdefault("request", {})
+        ah = request.setdefault("agent_hint", {})
+        sess = ah.setdefault("session", {})
+        sess.setdefault("session_id", sid)
+        sess.setdefault("parent_session_id", record.get("parent_session_id") or sid)
+        ah["agent_status"] = st
+        record["status_source"] = "status_sink"
+        if str(st.get("state", "")).lower() == "finalize":
+            finalize_applied += 1
+
+    sessions = set()
+    for _, record in rows:
+        with open(os.path.join(args.out, f"capture_{record['ordinal']:06d}.json"), "w", encoding="utf-8") as out:
+            json.dump(record, out, ensure_ascii=False, separators=(",", ":"))
+        sessions.add(record["session_id"])
+
     report = {
         "input": args.input,
         "out": args.out,
         "hints": args.hints,
         "records_seen": seq,
-        "records_kept": kept,
+        "records_kept": len(rows),
         "records_skipped": skipped,
         "records_skipped_no_hint": skipped_no_hint,
         "sessions": len(sessions),
         "case_id": case_id,
         "session_id_fallback": args.session_id,
+        "status_events": len(status_events),
+        "finalize_applied": finalize_applied,
     }
     with open(os.path.join(args.out, "capture.report.json"), "w", encoding="utf-8") as out:
         json.dump(report, out, ensure_ascii=False, indent=2)
@@ -127,8 +173,9 @@ def main() -> int:
     ap.add_argument("--out", required=True)
     ap.add_argument("--hints", choices=["on", "off"], default="on")
     ap.add_argument("--case-id", default=None)
-    ap.add_argument("--session-id", default=None,
-                    help="fallback session id when the capture carries no hint/header (one harness run = one session)")
+    ap.add_argument("--session-id", default=None)
+    ap.add_argument("--status-events", default=None,
+                    help="harness out-of-band agent_status JSONL (finalize/pause/resume)")
     args = ap.parse_args()
     return convert(args)
 

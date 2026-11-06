@@ -31,18 +31,22 @@ def _capture(path):
     path.write_text(json.dumps(main) + "\n" + json.dumps(aux) + "\n", encoding="utf-8")
 
 
-def _convert(tmp_path, hints):
+def _convert(tmp_path, hints, status_events=None):
     src = tmp_path / "capture.jsonl"
     _capture(src)
     out = tmp_path / f"mi_{hints}"
-    convert(Namespace(input=str(src), out=str(out), hints=hints, case_id="t1", session_id=None))
+    convert(Namespace(input=str(src), out=str(out), hints=hints, case_id="t1",
+                      session_id=None, status_events=status_events))
     return out
+
+
+def _files(out):
+    return [p for p in out.glob("*.json") if p.name not in ("capture.report.json", "status_events.jsonl")]
 
 
 def test_hints_on_preserves_full_hint(tmp_path):
     out = _convert(tmp_path, "on")
-    files = [p for p in out.glob("*.json") if p.name != "capture.report.json"]
-    assert len(files) == 1  # auxiliary no-hint call dropped
+    assert len(_files(out)) == 1  # auxiliary no-hint call dropped
     dataset = tmp_path / "ds_on.jsonl"
     build(Namespace(input_dir=str(out), output=str(dataset), report=None,
                     default_max_out_len=256, completion_token_cap=256, state_mode="running"))
@@ -58,8 +62,7 @@ def test_hints_on_preserves_full_hint(tmp_path):
 
 def test_hints_off_keeps_all_requests_without_hints(tmp_path):
     out = _convert(tmp_path, "off")
-    files = [p for p in out.glob("*.json") if p.name != "capture.report.json"]
-    assert len(files) == 2  # auxiliary call kept, grouped by the harness session header
+    assert len(_files(out)) == 2  # auxiliary call kept, grouped by the harness session header
     dataset = tmp_path / "ds_off.jsonl"
     build(Namespace(input_dir=str(out), output=str(dataset), report=None,
                     default_max_out_len=256, completion_token_cap=256, state_mode="running"))
@@ -67,3 +70,18 @@ def test_hints_off_keeps_all_requests_without_hints(tmp_path):
     assert all(r["agent_hint"]["session"]["session_id"] == "s1" for r in rows)
     assert all("priority" not in r["agent_hint"] for r in rows)
     assert validate(str(dataset), "off") == 0
+
+
+def test_status_sink_finalize_applied_to_last_request(tmp_path):
+    sink = tmp_path / "status.jsonl"
+    sink.write_text(json.dumps({
+        "session": {"session_id": "s1"},
+        "agent_status": {"state": "finalize", "state_since_ms": 123},
+    }) + "\n", encoding="utf-8")
+    out = _convert(tmp_path, "on", status_events=str(sink))
+    dataset = tmp_path / "ds_status.jsonl"
+    build(Namespace(input_dir=str(out), output=str(dataset), report=None,
+                    default_max_out_len=256, completion_token_cap=256, state_mode="running"))
+    row = json.loads(dataset.read_text(encoding="utf-8").splitlines()[-1])
+    assert row["agent_hint"]["agent_status"]["state"] == "finalize"
+    assert validate(str(dataset), "on", True) == 0

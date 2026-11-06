@@ -23,12 +23,13 @@ agent-default-model:
   model: $MODEL
 EOF
 
+SINK="${CAPTURE_STATUS_LOG:-$OUT/status.jsonl}"
 cat > "$OUT/dsh.patch.yml" <<EOF
 - id: agent-hints
   config:
     baseURL: $ENDPOINT
     apiKeyEnv: CAPTURE_API_KEY
-    statusSink: $OUT/status.jsonl
+    statusSink: $SINK
     predictionStatic:
       latency_ms: 1000
       output_tokens: 64

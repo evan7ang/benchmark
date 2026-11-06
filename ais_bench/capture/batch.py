@@ -68,6 +68,7 @@ def run_one(task: dict, args, run_dir: str) -> dict:
     env.update({
         "CAPTURE_ENDPOINT": endpoint,
         "CAPTURE_LOG": log,
+        "CAPTURE_STATUS_LOG": os.path.join(run_dir, "status_events.jsonl"),
         "CAPTURE_RUN_ID": task["task_id"],
         "CAPTURE_TASK_ID": task["task_id"],
         "CAPTURE_PROMPT": task["prompt"],
@@ -88,9 +89,11 @@ def run_one(task: dict, args, run_dir: str) -> dict:
     mi_out = os.path.join(run_dir, "model_io")
     stats = {}
     if os.path.exists(log) and os.path.getsize(log) > 0:
+        status_log = env.get("CAPTURE_STATUS_LOG")
         ns = argparse.Namespace(input=log, out=mi_out, hints=args.hints,
                                 case_id=task["task_id"],
-                                session_id=task["task_id"] if args.hints == "off" else None)
+                                session_id=task["task_id"] if args.hints == "off" else None,
+                                status_events=status_log if status_log and os.path.exists(status_log) else None)
         model_io_convert(ns)
         report_path = os.path.join(mi_out, "capture.report.json")
         if os.path.exists(report_path):
