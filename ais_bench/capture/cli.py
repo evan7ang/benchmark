@@ -12,9 +12,11 @@ import sys
 import threading
 from http.server import ThreadingHTTPServer
 
+from .batch import run_batch
 from .model_io import convert as model_io_convert
 from .recorder import Recorder
 from .v2_builder import build as capture_v2_build
+from .validate import validate as validate_dataset
 
 
 def cmd_record(args) -> int:
@@ -98,6 +100,14 @@ def cmd_build(args) -> int:
     return subprocess.run(cmd).returncode
 
 
+def cmd_batch(args) -> int:
+    return run_batch(args)
+
+
+def cmd_validate(args) -> int:
+    return validate_dataset(args.dataset, args.hints)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(prog="ais_bench.capture")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -151,6 +161,31 @@ def main() -> int:
     p.add_argument("--context-reserve", type=int, default=None)
     p.add_argument("--exclude-compressor", action="store_true")
     p.set_defaults(func=cmd_build)
+
+    p = sub.add_parser("batch", help="run a task list through a harness and build one v2 dataset")
+    p.add_argument("--tasks", required=True, help="JSONL: {task_id, prompt, turns?}")
+    p.add_argument("--harness-cmd", required=True)
+    p.add_argument("--hints", choices=["on", "off"], default="on")
+    p.add_argument("--out", required=True)
+    p.add_argument("--max-tasks", type=int, default=0)
+    p.add_argument("--turns", type=int, default=1)
+    p.add_argument("--upstream-host", required=True)
+    p.add_argument("--upstream-port", type=int, required=True)
+    p.add_argument("--upstream-model", default="")
+    p.add_argument("--model-id", default="capture-model")
+    p.add_argument("--listen-host", default="127.0.0.1")
+    p.add_argument("--listen-port", type=int, default=0,
+                   help="fixed port for harnesses whose provider endpoint is configured out of band (Dify)")
+    p.add_argument("--env", action="append", default=[])
+    p.add_argument("--default-max-out-len", type=int, default=256)
+    p.add_argument("--completion-token-cap", type=int, default=256)
+    p.add_argument("--allow-failures", action="store_true")
+    p.set_defaults(func=cmd_batch)
+
+    p = sub.add_parser("validate", help="validate a captured Agent Hint v2 dataset")
+    p.add_argument("--dataset", required=True)
+    p.add_argument("--hints", choices=["on", "off"], default="on")
+    p.set_defaults(func=cmd_validate)
 
     args = ap.parse_args()
     return args.func(args)

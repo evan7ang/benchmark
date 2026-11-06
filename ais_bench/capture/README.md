@@ -100,3 +100,50 @@ Dify stores model endpoints in its own DB. Point the app's agent-hints provider
 at the recorder (http://<host>:<port>/v1), then run
 examples/dify_task.py through capture run --listen-port <port>. Switching
 between hints on/off is a provider switch (agent-hints vs plain OpenAI-compatible).
+
+## Batch production
+
+`tasks.jsonl` (one JSON object per line):
+
+```json
+{"task_id":"t001","prompt":"...","turns":2}
+```
+
+```bash
+python -m ais_bench.capture batch \
+  --tasks tasks.jsonl \
+  --harness-cmd "bash examples/dsh_task.sh" \
+  --hints on --out captures/dsh_on_batch \
+  --upstream-host <model-host> --upstream-port <model-port> \
+  --upstream-model <served-model> \
+  --env DSH_BIN=... --env DSH_HOME=... --env NODE_BIN=...
+```
+
+Output:
+
+```
+captures/dsh_on_batch/
+  runs/<task_id>/{requests.jsonl,model_io/}
+  model_io/                 # merged per-request model_io
+  dataset_v2.jsonl          # Agent Hint v2 dataset
+  dataset_v2.jsonl.report.json
+  dataset.manifest.json     # harness/cmd/tasks/sessions/requests/coverage/sha256
+```
+
+Validate:
+
+```bash
+python -m ais_bench.capture validate --dataset captures/dsh_on_batch/dataset_v2.jsonl --hints on
+```
+
+Notes:
+- hints on keeps only requests that actually carried a hint (auxiliary
+  session-title/compaction calls are dropped so no hint is fabricated).
+- hints off keeps all inference calls and groups them by the harness session
+  header; the dataset has no priority/cache/prediction.
+- Dify's provider endpoint is configured out of band: use a fixed
+  `--listen-port` for the batch and point the provider at it once.
+- The DSH example uses the hint provider for both modes; `--hints off` is the
+  serving-side dataset without hints. A true harness-without-plugin run can use
+  the `llm-pi-ai` route with `reasoningEfforts: false`.
+- Unit tests: `pytest ais_bench/capture/tests`.
