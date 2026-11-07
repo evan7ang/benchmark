@@ -30,6 +30,7 @@ from ais_bench.benchmark.openicl.icl_inferencer.output_handler.ppl_inferencer_ou
 )
 from ais_bench.benchmark.utils.logging.error_codes import ICLI_CODES
 from ais_bench.benchmark.global_consts import REQUEST_TIME_OUT
+from ais_bench.benchmark.utils.agent_hint import record_agent_hint_audit
 
 
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=REQUEST_TIME_OUT)
@@ -182,6 +183,16 @@ class BaseAPIModel(BaseModel):
                 url=url, json=payload, headers=headers, timeout=timeout
             ) as response:
                 text = await response.text()
+                session_block = payload.get("session") if isinstance(payload, dict) else None
+                status_block = payload.get("agent_status") if isinstance(payload, dict) else None
+                record_agent_hint_audit(
+                    "status",
+                    session_id=session_block.get("session_id") if isinstance(session_block, dict) else None,
+                    state=status_block.get("state") if isinstance(status_block, dict) else None,
+                    payload=payload,
+                    status=response.status,
+                    response=text[:1000],
+                )
                 return response.status, text
         finally:
             if close_session:

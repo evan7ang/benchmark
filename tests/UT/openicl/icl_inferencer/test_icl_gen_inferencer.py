@@ -137,6 +137,36 @@ class TestGenInferencer(unittest.TestCase):
 
     @mock.patch("ais_bench.benchmark.openicl.icl_inferencer.icl_base_inferencer.build_model_from_cfg")
     @mock.patch("ais_bench.benchmark.openicl.icl_inferencer.icl_base_inferencer.model_abbr_from_cfg", return_value="mabbr")
+    def test_get_data_list_forwards_delay_after_ms(self, m_abbr, m_build):
+        m_build.return_value = DummyModel()
+        inf = GenInferencer(model_cfg={}, batch_size=1)
+
+        class DummyDatasetDelay:
+            def __init__(self):
+                self.test = Dataset.from_dict({
+                    "question": ["q0", "q1"],
+                    "delay_after_ms": [None, 40000],
+                })
+                self.reader = type("R", (), {
+                    "output_column": None,
+                    "dataset": self.test,
+                    "get_max_out_len": lambda self=None: [5, 5],
+                    "get_timestamp": lambda self=None: None,
+                })()
+                self.abbr = "delay"
+
+        class DummyRetrieverDelay(DummyRetriever):
+            def __init__(self, dataset):
+                super().__init__(dataset)
+                self.dataset_reader.dataset = dataset.test
+
+        r = DummyRetrieverDelay(DummyDatasetDelay())
+        data_list = inf.get_data_list(r)
+        self.assertIsNone(data_list[0]["delay_after_ms"])
+        self.assertEqual(data_list[1]["delay_after_ms"], 40000)
+
+    @mock.patch("ais_bench.benchmark.openicl.icl_inferencer.icl_base_inferencer.build_model_from_cfg")
+    @mock.patch("ais_bench.benchmark.openicl.icl_inferencer.icl_base_inferencer.model_abbr_from_cfg", return_value="mabbr")
     def test_batch_inference_async(self, m_abbr, m_build):
         """测试GenInferencer的batch_inference方法调用model.generate和report_cache_info_sync"""
         m_build.return_value = DummyModel()
@@ -389,6 +419,52 @@ class TestGenInferencer(unittest.TestCase):
         # can look up the correct LoRA adapter.
         self.assertTrue(hasattr(cap.captured_output, "data_id"))
         self.assertEqual(cap.captured_output.data_id, 42)
+
+    @mock.patch("ais_bench.benchmark.openicl.icl_inferencer.icl_base_inferencer.build_model_from_cfg")
+    @mock.patch("ais_bench.benchmark.openicl.icl_inferencer.icl_base_inferencer.model_abbr_from_cfg", return_value="mabbr")
+    def test_do_request_pops_delay_after_ms(self, m_abbr, m_build):
+        """delay_after_ms is a session-worker control field, not request body data."""
+        class KwargsCapturingModel:
+            def __init__(self):
+                self.kwargs = None
+
+            def parse_template(self, p, mode="gen"):
+                return p
+
+            async def generate(self, inputs, max_out_len, output=None, session=None, **kwargs):
+                self.kwargs = kwargs
+                if output is not None:
+                    output.success = True
+                    output.content = "ok"
+
+        cap = KwargsCapturingModel()
+        m_build.return_value = cap
+        inf = GenInferencer(model_cfg={}, batch_size=1, pass_agent_hint=True)
+        inf.status_counter = DummyStatusCounter()
+        inf.output_handler.report_cache_info = mock.AsyncMock(return_value=True)
+
+        data = {
+            "index": 0,
+            "prompt": "test_input",
+            "data_abbr": "test",
+            "max_out_len": 10,
+            "gold": "test_gold",
+            "delay_after_ms": 40000,
+            "agent_hint": {
+                "session": {"session_id": "s-1", "epoch": 0},
+                "agent_status": {"state": "pause"},
+            },
+        }
+
+        async def run_test():
+            await inf.do_request(data, mock.Mock(), mock.Mock())
+
+        asyncio.run(run_test())
+
+        self.assertNotIn("delay_after_ms", cap.kwargs)
+        # The outer dict is deep-copied inside do_request, so the session
+        # worker still sees the control field afterwards.
+        self.assertEqual(data["delay_after_ms"], 40000)
 
 
 if __name__ == '__main__':

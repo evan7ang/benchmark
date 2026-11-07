@@ -3,10 +3,13 @@
 import base64
 import copy
 import json
+import os
+import time
 from typing import Any, Dict, Optional
 
 HEADER_NAME = "X-Agent-Hint"
 MAX_HEADER_CHARS = 16384
+AUDIT_ENV = "AISBENCH_AGENT_HINT_AUDIT_PATH"
 
 _WIRE_STATE_ALIASES = {
     "resume": "running",
@@ -129,6 +132,29 @@ def encode_agent_hint_header(hint: Any) -> str:
         payload, ensure_ascii=False, separators=(",", ":")
     ).encode("utf-8")
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def record_agent_hint_audit(kind: str, **fields: Any) -> None:
+    """Append one send-side audit record when AISBENCH_AGENT_HINT_AUDIT_PATH is set.
+
+    This is an opt-in conformance hook: normal runs do not write anything.
+    The write is one O_APPEND syscall per record so multiple worker processes
+    can share the same file. Audit failures never affect inference.
+    """
+    path = os.getenv(AUDIT_ENV, "").strip()
+    if not path:
+        return
+    record = {"kind": kind, "ts": time.time()}
+    record.update(fields)
+    try:
+        line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
+        fd = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o644)
+        try:
+            os.write(fd, line.encode("utf-8"))
+        finally:
+            os.close(fd)
+    except Exception:  # noqa: BLE001 - telemetry must never break inference
+        return
 
 
 def agent_hint_perf_metadata(hint: Any) -> Dict[str, Any]:

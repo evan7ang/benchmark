@@ -13,6 +13,8 @@ from ais_bench.benchmark.utils.agent_hint import (
     MAX_HEADER_CHARS,
     encode_agent_hint_header,
     lifecycle_state_of,
+    normalize_agent_hint_for_wire,
+    record_agent_hint_audit,
     session_id_of,
 )
 
@@ -210,6 +212,14 @@ class VLLMCustomAPI(BaseAPIModel):
         if agent_hint is not None and self.agent_hint_transport == "header":
             header_value = encode_agent_hint_header(agent_hint)
             output.request_headers[HEADER_NAME] = header_value
+            record_agent_hint_audit(
+                "header",
+                data_id=getattr(output, "data_id", None),
+                session_id=session_id_of(agent_hint),
+                state=lifecycle_state_of(agent_hint),
+                header=header_value,
+                hint=normalize_agent_hint_for_wire(agent_hint),
+            )
             if len(header_value) > MAX_HEADER_CHARS:
                 self.logger.warning(
                     f"[agent_hint][send-header] encoded header is "

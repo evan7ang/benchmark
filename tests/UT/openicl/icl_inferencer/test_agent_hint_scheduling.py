@@ -1,4 +1,5 @@
 import asyncio
+import time
 import unittest
 from unittest.mock import AsyncMock, MagicMock
 
@@ -76,6 +77,46 @@ class TestAgentHintScheduling(unittest.TestCase):
         self.assertEqual(payload["session"]["session_id"], "s-1")
         self.assertEqual(payload["session"]["epoch"], 2)
         self.assertEqual(payload["agent_status"]["state"], "running")
+
+    def test_delay_after_ms_only_for_control_states(self):
+        data = {"delay_after_ms": 40000}
+        for state in ("pause", "suspend", "tool", "PAUSE"):
+            self.assertEqual(BaseApiInferencer._delay_after_ms(data, state), 40000)
+        for state in ("running", "resume", "finalize", ""):
+            self.assertEqual(BaseApiInferencer._delay_after_ms(data, state), 0)
+        self.assertEqual(BaseApiInferencer._delay_after_ms({}, "pause"), 0)
+        self.assertEqual(
+            BaseApiInferencer._delay_after_ms({"delay_after_ms": None}, "pause"), 0
+        )
+        self.assertEqual(
+            BaseApiInferencer._delay_after_ms({"delay_after_ms": "bad"}, "pause"), 0
+        )
+        self.assertEqual(
+            BaseApiInferencer._delay_after_ms({"delay_after_ms": -1}, "pause"), 0
+        )
+
+    def test_sleep_with_stop_returns_early_when_event_set(self):
+        async def run():
+            stop_event = asyncio.Event()
+            stop_event.set()
+            started = time.monotonic()
+            await BaseApiInferencer._sleep_with_stop(None, 5.0, stop_event)
+            self.assertLess(time.monotonic() - started, 1.0)
+
+        asyncio.run(run())
+
+    def test_sleep_with_stop_can_be_cancelled(self):
+        async def run():
+            stop_event = asyncio.Event()
+            task = asyncio.create_task(
+                BaseApiInferencer._sleep_with_stop(None, 5.0, stop_event)
+            )
+            await asyncio.sleep(0.01)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        asyncio.run(run())
 
     def test_report_agent_status_disabled(self):
         reporter = MagicMock()

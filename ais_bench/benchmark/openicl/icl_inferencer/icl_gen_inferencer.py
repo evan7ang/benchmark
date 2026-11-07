@@ -89,6 +89,9 @@ class GenInferencer(BaseApiInferencer, BaseLocalInferencer):
         # stage is a control field for session end-of-life decisions; never
         # forward it to the request body.
         data.pop("stage", None)
+        # delay_after_ms is an inter-request delay consumed by the session-aware
+        # worker after this request completes; never forward it to the body.
+        data.pop("delay_after_ms", None)
         # ---- 控制面请求检测（必须在 pop agent_hint 之前） ----
         # manage_request=True 的请求是纯控制面请求（如 evict），服务器端
         # 不执行推理，只执行 edits。这类请求不应计入性能统计，且在

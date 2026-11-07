@@ -613,6 +613,32 @@ class BaseApiInferencer(BaseInferencer):
     def _task_queue_has_real_data(q: "asyncio.Queue"):
         return q.qsize() > 1  # 1 means the last data(None) of each queue.
 
+    @staticmethod
+    def _delay_after_ms(data: Any, state: str) -> int:
+        """Return the inter-request delay for a lifecycle state, in milliseconds.
+
+        delay_after_ms is an AISBench control field. It only applies to
+        pause/suspend/tool rows; resume/running/finalize never sleep.
+        """
+        if not isinstance(data, dict):
+            return 0
+        if str(state).lower() not in ("pause", "suspend", "tool"):
+            return 0
+        try:
+            value = int(data.get("delay_after_ms") or 0)
+        except (TypeError, ValueError):
+            return 0
+        return max(0, value)
+
+    async def _sleep_with_stop(self, seconds: float, stop_event: asyncio.Event) -> None:
+        """Sleep for ``seconds`` but wake up early when shutdown is signalled."""
+        if seconds <= 0:
+            return
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=seconds)
+        except asyncio.TimeoutError:
+            return
+
     async def _report_agent_status(self, session, data: dict, state: str) -> None:
         if not getattr(self, "pass_agent_hint", False):
             return
@@ -767,6 +793,7 @@ class BaseApiInferencer(BaseInferencer):
             """
             split = False
             split_reason = ""
+            pause_delay_ms = 0
             async with session_sem:
                 self.logger.info(f"[session-aware] session {psid} acquired exec slot, work queue len is {q.qsize()}")
                 while not stop_event.is_set():
@@ -816,23 +843,39 @@ class BaseApiInferencer(BaseInferencer):
                     if is_v2 and state.lower() in ("pause", "suspend", "finalize", "tool"):
                         await self._report_agent_status(session, data, state)
 
+                    delay_ms = self._delay_after_ms(data, state)
+                    if delay_ms > 0:
+                        if state.lower() in ("pause", "suspend"):
+                            # Release the exec slot before the idle wait: the
+                            # session is idle anyway, and holding session_sem
+                            # here would collapse effective concurrency.
+                            pause_delay_ms = delay_ms
+                        else:  # tool: do not split the span, sleep in place
+                            await self._sleep_with_stop(delay_ms / 1000.0, stop_event)
+
                     if split:
-                        if self._task_queue_has_real_data(q):
-                            create_new_task(psid, q)
-                            self.logger.info(
-                                f"[session-aware] session {psid} interrupted after "
-                                f"{split_reason}, remaining data handed to a new task"
-                            )
-                        else:
-                            self.logger.info(
-                                f"[session-aware] session {psid} interrupted after "
-                                f"{split_reason}, no remaining data"
-                            )
                         break
 
+            # The pause sleep must happen after our task released the exec
+            # slot, but before the follow-up task sends the resume request.
+            if pause_delay_ms > 0 and self._task_queue_has_real_data(q):
+                await self._sleep_with_stop(pause_delay_ms / 1000.0, stop_event)
+
+            if split:
+                if not stop_event.is_set() and self._task_queue_has_real_data(q):
+                    create_new_task(psid, q)
+                    self.logger.info(
+                        f"[session-aware] session {psid} interrupted after "
+                        f"{split_reason}, remaining data handed to a new task"
+                    )
+                else:
+                    self.logger.info(
+                        f"[session-aware] session {psid} interrupted after "
+                        f"{split_reason}, no remaining data"
+                    )
+            else:
                 # session finished.
-                if not split:
-                    self.logger.info(f"[session-aware] session {psid} finished")
+                self.logger.info(f"[session-aware] session {psid} finished")
 
         async def wait_all_tasks() -> None:
             """Manually wait for every task until the list is empty.
