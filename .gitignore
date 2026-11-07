@@ -7,6 +7,11 @@ test_reports
 .eggs
 ais_bench_benchmark.egg-info
 
+# Local benchmark/capture run artifacts
+outputs/
+tmp/
+tests/manual/**/results/
+
 # Ignore downloaded dataset data files (keep Python source modules)
 ais_bench/datasets/**
 !ais_bench/datasets/**/
