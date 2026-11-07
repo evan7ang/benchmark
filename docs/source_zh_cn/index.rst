@@ -60,6 +60,7 @@ AISBench Benchmark 是基于 `OpenCompass <https://github.com/open-compass/openc
    advanced_tutorials/session_aware_agent_hint_v2_harness_capture
    advanced_tutorials/session_aware_agent_hint_v2_kvc_offload_requirement
    advanced_tutorials/session_aware_agent_hint_v2_kvc_offload_results_template
+   advanced_tutorials/session_aware_agent_hint_v2_test_playbook
 
 
 
