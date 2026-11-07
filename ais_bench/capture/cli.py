@@ -20,7 +20,10 @@ from .validate import validate as validate_dataset
 
 
 def cmd_record(args) -> int:
-    rec = Recorder(args.upstream_host, args.upstream_port, args.upstream_model, args.log, args.model_id)
+    rec = Recorder(
+        args.upstream_host, args.upstream_port, args.upstream_model, args.log,
+        args.model_id, forward_agent_status=getattr(args, "forward_agent_status", False),
+    )
     os.makedirs(os.path.dirname(os.path.abspath(args.log)), exist_ok=True)
     print(f"recorder :{args.listen_port} -> {args.upstream_host}:{args.upstream_port} log={args.log}", flush=True)
     rec.serve(args.listen_host, args.listen_port)
@@ -47,7 +50,10 @@ def cmd_run(args) -> int:
     port = args.listen_port or _free_port()
     log = os.path.abspath(os.path.join(args.out, "requests.jsonl"))
     os.makedirs(args.out, exist_ok=True)
-    rec = Recorder(args.upstream_host, args.upstream_port, args.upstream_model, log, args.model_id)
+    rec = Recorder(
+        args.upstream_host, args.upstream_port, args.upstream_model, log,
+        args.model_id, forward_agent_status=getattr(args, "forward_agent_status", False),
+    )
     server = ThreadingHTTPServer((args.listen_host, port), rec.handler())
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -71,11 +77,14 @@ def cmd_run(args) -> int:
         server.server_close()
     print(f"[capture] harness exit={rc}; requests={log}", flush=True)
     if args.build_model_io:
-        ns = argparse.Namespace(
-            input=log, out=os.path.join(args.out, "model_io"), hints=args.hints,
-            case_id=args.case_id, session_id=args.run_id,
-        )
-        model_io_convert(ns)
+        if not os.path.exists(log):
+            print("[capture] no requests.jsonl produced; skip model_io conversion", flush=True)
+        else:
+            ns = argparse.Namespace(
+                input=log, out=os.path.join(args.out, "model_io"), hints=args.hints,
+                case_id=args.case_id, session_id=args.run_id,
+            )
+            model_io_convert(ns)
     return rc
 
 
@@ -86,6 +95,10 @@ def cmd_build(args) -> int:
             default_max_out_len=args.default_max_out_len,
             completion_token_cap=args.completion_token_cap,
             state_mode=args.state_mode or "running",
+            status_events=args.status_events,
+            tokenizer=args.tokenizer,
+            max_context=args.max_context,
+            skip_tokenizer_check=args.skip_tokenizer_check,
         )
         return capture_v2_build(ns)
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -121,6 +134,8 @@ def main() -> int:
     p.add_argument("--upstream-model", default="")
     p.add_argument("--model-id", default="capture-model")
     p.add_argument("--log", required=True)
+    p.add_argument("--forward-agent-status", action="store_true", default=False,
+                   help="Forward /agent-status to the upstream instead of recording only.")
     p.set_defaults(func=cmd_record)
 
     p = sub.add_parser("to-model-io", help="convert capture JSONL to model_io/*.json")
@@ -145,6 +160,8 @@ def main() -> int:
     p.add_argument("--listen-port", type=int, default=0)
     p.add_argument("--env", action="append", default=[])
     p.add_argument("--case-id", default=None)
+    p.add_argument("--forward-agent-status", action="store_true", default=False,
+                   help="Forward /agent-status to the upstream instead of recording only.")
     p.add_argument("--build-model-io", action="store_true", default=True)
     p.add_argument("--no-build-model-io", dest="build_model_io", action="store_false")
     p.set_defaults(func=cmd_run)
@@ -161,6 +178,11 @@ def main() -> int:
     p.add_argument("--completion-token-cap", type=int, default=256)
     p.add_argument("--max-context", type=int, default=None)
     p.add_argument("--context-reserve", type=int, default=None)
+    p.add_argument("--status-events", default=None,
+                   help="status.jsonl sink for real finalize events")
+    p.add_argument("--tokenizer", default=None,
+                   help="tokenizer/chat-template path for context validation")
+    p.add_argument("--skip-tokenizer-check", action="store_true")
     p.add_argument("--exclude-compressor", action="store_true")
     p.set_defaults(func=cmd_build)
 

@@ -85,14 +85,21 @@ def convert(args) -> int:
             usage = rec.get("usage") or {}
             prompt_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
             completion_tokens = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
-            request = {
-                "messages": messages,
-                "model": body.get("model"),
-                "stream": body.get("stream"),
+            # Preserve every generation-relevant body field. The v2 builder
+            # forwards them to the replay row so DSH-specific fields such as
+            # thinking / reasoning_effort are not silently lost. Control fields
+            # and max_tokens are excluded: max_out_len owns output length.
+            control_fields = {
+                "messages", "model", "stream", "stream_options", "agent_hint",
+                "max_tokens", "max_completion_tokens",
             }
-            for key in ("tools", "tool_choice", "temperature", "top_p", "seed", "enable_thinking"):
-                if key in body:
-                    request[key] = body[key]
+            request = {
+                key: value for key, value in body.items()
+                if key not in control_fields
+            }
+            request["messages"] = messages
+            request["model"] = body.get("model")
+            request["stream"] = body.get("stream")
             if args.hints == "on":
                 full_hint = dict(hint) if isinstance(hint, dict) else {}
                 sess = full_hint.setdefault("session", {})

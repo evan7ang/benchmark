@@ -5,6 +5,9 @@ harness** on real tasks, capturing its model requests (including the real
 `X-Agent-Hint` header), and persisting them as a durable JSON dataset that the
 existing v2 builder / replay path consumes.
 
+Chinese usage guide:
+`docs/source_zh_cn/advanced_tutorials/session_aware_agent_hint_v2_harness_capture.md`
+
 ```
 real harness (DSH / Dify / ...)
   │  hints on:  agent-hints provider emits X-Agent-Hint
@@ -35,6 +38,10 @@ python -m ais_bench.capture run \
 
 `run` starts the recorder on a free port, exports `CAPTURE_ENDPOINT` and
 `CAPTURE_LOG` to the harness command, then writes `model_io/` automatically.
+Use `--forward-agent-status` to forward `/agent-status` to the upstream instead
+of only recording it.
+
+For task lists, prefer `batch` (see below).
 
 ### Build the v2 dataset
 
@@ -74,6 +81,21 @@ DSH example notes.
 
 ## Notes / known gaps
 
+- `build --status-events status.jsonl` uses real `turn/end(completed)` events
+  to set `finalize`; without it, `--state-mode completed-finalize` only derives
+  finalize from the last record. Incomplete sessions are reported separately.
+- `build --tokenizer <path> --max-context <n>` validates
+  `prompt(messages+tools+chat template) + max_out_len` and trims/drops
+  overflow. Use a Python environment with `transformers` installed, or pass
+  `--skip-tokenizer-check` to skip validation.
+- The recorder parses streamed `usage` across chunk boundaries; `max_out_len`
+  is the captured completion token count (capped by `--completion-token-cap`).
+- The builder fills every optional column on every row (null when absent) so
+  old `datasets.Dataset.from_list` versions do not drop later-only columns.
+- DSH emits `pause`/`running` out-of-band on `status.jsonl`; the current V2
+  replay consumes request-header `running`/`resume` plus merged `finalize`, not
+  timed `pause` events. Replaying tool-wait pause/offload needs a timed status
+  event channel (or `status_before/status_after`).
 - Motor's current `cache_control` parser expects a dict, while the v2 header
   carries the spec's list form; the list is currently ignored (WARNING). The
   dataset is faithful; the consumer needs a small fix.

@@ -30,11 +30,28 @@ def decode_hint(value):
         return None
 
 
-def extract_usage(chunk: bytes):
-    text = chunk.decode("utf-8", errors="replace").strip()
-    if not text.startswith("data:"):
-        return None
-    payload = text[5:].strip()
+def parse_json_body(raw: bytes):
+    """Decode a request body, tolerating raw control characters.
+
+    Some harness/tool-result payloads contain literal control characters inside
+    JSON strings. ``json.loads(..., strict=False)`` accepts them; re-serializing
+    with ``json.dumps`` escapes them, so the upstream receives valid JSON.
+    Returns (parsed_or_None, mode) where mode is strict/relaxed/invalid/empty.
+    """
+    if not raw:
+        return None, "empty"
+    text = raw.decode("utf-8", errors="replace")
+    try:
+        return json.loads(text), "strict"
+    except Exception:
+        pass
+    try:
+        return json.loads(text, strict=False), "relaxed"
+    except Exception:
+        return None, "invalid"
+
+
+def _usage_from_payload(payload: str):
     if not payload or payload == "[DONE]":
         return None
     try:
@@ -45,13 +62,35 @@ def extract_usage(chunk: bytes):
     return usage if isinstance(usage, dict) else None
 
 
+def feed_usage(buffer: bytes, chunk: bytes):
+    """Consume an SSE byte stream and return (latest_usage, remaining_buffer).
+
+    Chunks are arbitrary: a ``data:`` line can be split across reads, and one
+    read can contain several SSE lines. Keep the partial tail so the caller can
+    feed the next chunk. ``\r\n`` is handled by strip().
+    """
+    buffer += chunk
+    usage = None
+    while b"\n" in buffer:
+        line, buffer = buffer.split(b"\n", 1)
+        text = line.decode("utf-8", errors="replace").strip()
+        if not text.startswith("data:"):
+            continue
+        found = _usage_from_payload(text[5:].strip())
+        if found is not None:
+            usage = found
+    return usage, buffer
+
+
 class Recorder:
-    def __init__(self, upstream_host, upstream_port, upstream_model, log_path, model_id):
+    def __init__(self, upstream_host, upstream_port, upstream_model, log_path, model_id,
+                 forward_agent_status=False):
         self.upstream_host = upstream_host
         self.upstream_port = upstream_port
         self.upstream_model = upstream_model
         self.log_path = log_path
         self.model_id = model_id
+        self.forward_agent_status = bool(forward_agent_status)
 
     def log(self, record):
         line = json.dumps(record, ensure_ascii=False)
@@ -87,10 +126,7 @@ class Recorder:
                 length = int(self.headers.get("Content-Length", 0) or 0)
                 raw = self.rfile.read(length) if length else b""
                 headers = {k.lower(): v for k, v in self.headers.items()}
-                try:
-                    original = json.loads(raw.decode("utf-8", errors="replace"))
-                except Exception:
-                    original = None
+                original, body_parse = parse_json_body(raw)
                 body = dict(original) if isinstance(original, dict) else None
                 if body is not None:
                     body["model"] = rec.upstream_model
@@ -99,9 +135,48 @@ class Recorder:
                 new_raw = json.dumps(body).encode() if body is not None else raw
 
                 if self.path.rstrip("/").endswith("/agent-status"):
-                    rec.log({"ts": time.time(), "path": self.path, "headers": headers,
-                             "body": original, "kind": "agent-status", "status": 200})
-                    self._json(200, {})
+                    if not rec.forward_agent_status:
+                        rec.log({"ts": time.time(), "path": self.path, "headers": headers,
+                                 "body": original, "kind": "agent-status", "status": 200,
+                                 "forwarded": False})
+                        self._json(200, {})
+                        return
+                    fwd = {k: v for k, v in self.headers.items()
+                           if k.lower() not in ("host", "content-length", "connection", "accept-encoding")}
+                    fwd["Host"] = f"{rec.upstream_host}:{rec.upstream_port}"
+                    fwd["Content-Length"] = str(len(raw))
+                    t0 = time.time()
+                    try:
+                        conn = http.client.HTTPConnection(
+                            rec.upstream_host, rec.upstream_port, timeout=30
+                        )
+                        conn.request("POST", self.path, body=raw, headers=fwd)
+                        resp = conn.getresponse()
+                        resp_body = resp.read()
+                        upstream_status = resp.status
+                        conn.close()
+                        rec.log({
+                            "ts": time.time(), "path": self.path, "headers": headers,
+                            "body": original, "kind": "agent-status",
+                            "forwarded": True, "upstream_status": upstream_status,
+                            "response": resp_body.decode("utf-8", errors="replace")[:2000],
+                            "duration_ms": round((time.time() - t0) * 1000, 1),
+                        })
+                        self.send_response(upstream_status)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", str(len(resp_body)))
+                        self.send_header("Connection", "close")
+                        self.end_headers()
+                        self.wfile.write(resp_body)
+                    except Exception as exc:
+                        err = f"{type(exc).__name__}: {exc}"
+                        rec.log({
+                            "ts": time.time(), "path": self.path, "headers": headers,
+                            "body": original, "kind": "agent-status",
+                            "forwarded": True, "error": err,
+                            "duration_ms": round((time.time() - t0) * 1000, 1),
+                        })
+                        self._json(502, {"error": err})
                     return
 
                 fwd = {k: v for k, v in self.headers.items()
@@ -113,6 +188,7 @@ class Recorder:
                 status = None
                 err = ""
                 usage = None
+                usage_buf = b""
                 try:
                     conn = http.client.HTTPConnection(rec.upstream_host, rec.upstream_port, timeout=900)
                     conn.request("POST", self.path, body=new_raw, headers=fwd)
@@ -129,12 +205,21 @@ class Recorder:
                         chunk = resp.read(8192)
                         if not chunk:
                             break
-                        found = extract_usage(chunk)
-                        if found:
+                        found, usage_buf = feed_usage(usage_buf, chunk)
+                        if found is not None:
                             usage = found
                         self.wfile.write(chunk)
                         self.wfile.flush()
                     conn.close()
+                    if usage is None:
+                        tail = usage_buf.decode("utf-8", errors="replace").strip()
+                        if tail:
+                            try:
+                                found = _usage_from_payload(tail)
+                            except Exception:
+                                found = None
+                            if found is not None:
+                                usage = found
                 except Exception as e:
                     err = f"{type(e).__name__}: {e}"
                     if status is None:
@@ -154,6 +239,7 @@ class Recorder:
                         "usage": usage,
                         "upstream_status": status,
                         "duration_ms": round((time.time() - t0) * 1000, 1),
+                        "body_parse": body_parse,
                         "error": err,
                     })
 
