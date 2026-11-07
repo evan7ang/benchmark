@@ -99,6 +99,8 @@ def cmd_build(args) -> int:
             tokenizer=args.tokenizer,
             max_context=args.max_context,
             skip_tokenizer_check=args.skip_tokenizer_check,
+            replay_pause_events=getattr(args, "replay_pause_events", False),
+            pause_delay_min_ms=getattr(args, "pause_delay_min_ms", 0),
         )
         return capture_v2_build(ns)
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -183,6 +185,10 @@ def main() -> int:
     p.add_argument("--tokenizer", default=None,
                    help="tokenizer/chat-template path for context validation")
     p.add_argument("--skip-tokenizer-check", action="store_true")
+    p.add_argument("--replay-pause-events", action="store_true",
+                   help="turn real pause/tool status events into pause/resume rows")
+    p.add_argument("--pause-delay-min-ms", type=int, default=0,
+                   help="floor for delay_after_ms on replayed pause rows")
     p.add_argument("--exclude-compressor", action="store_true")
     p.set_defaults(func=cmd_build)
 
@@ -203,6 +209,10 @@ def main() -> int:
     p.add_argument("--env", action="append", default=[])
     p.add_argument("--default-max-out-len", type=int, default=256)
     p.add_argument("--completion-token-cap", type=int, default=256)
+    p.add_argument("--replay-pause-events", action="store_true",
+                   help="turn real pause/tool status events into pause/resume rows")
+    p.add_argument("--pause-delay-min-ms", type=int, default=0,
+                   help="floor for delay_after_ms on replayed pause rows")
     p.add_argument("--allow-failures", action="store_true")
     p.set_defaults(func=cmd_batch)
 

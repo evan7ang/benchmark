@@ -67,6 +67,8 @@ def _build_args(input_dir, output, **overrides):
         tokenizer=None,
         max_context=None,
         skip_tokenizer_check=True,
+        replay_pause_events=False,
+        pause_delay_min_ms=0,
     )
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -175,6 +177,50 @@ class TestV2Builder(unittest.TestCase):
                 self.assertIn("thinking", row)
             self.assertIsNone(rows[0]["thinking"])
             self.assertEqual(rows[1]["thinking"], {"type": "enabled"})
+
+    def test_replay_pause_events_creates_pause_resume_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            input_dir = os.path.join(tmp, "model_io")
+            os.makedirs(input_dir)
+            records = [
+                _model_io_record("s-1", 1),
+                _model_io_record("s-1", 2),
+                _model_io_record("s-1", 3),
+                _model_io_record("s-1", 4),
+            ]
+            for record, start in zip(records, (1000, 5000, 9000, 13000)):
+                record["timing"]["source_utc"]["start_time"] = start
+            _write_model_io(input_dir, records)
+            status = os.path.join(tmp, "status.jsonl")
+            events = [
+                {"session": {"session_id": "s-1"}, "agent_status": {"state": "pause", "state_since_ms": 2000}},
+                {"session": {"session_id": "s-1"}, "agent_status": {"state": "running", "state_since_ms": 2100}},
+                {"session": {"session_id": "s-1"}, "agent_status": {"state": "pause", "state_since_ms": 6000}},
+                {"session": {"session_id": "s-1"}, "agent_status": {"state": "running", "state_since_ms": 6100}},
+                {"session": {"session_id": "s-1"}, "agent_status": {"state": "finalize", "state_since_ms": 14000}},
+            ]
+            with open(status, "w", encoding="utf-8") as f:
+                for event in events:
+                    f.write(json.dumps(event) + "\n")
+            output = os.path.join(tmp, "out.jsonl")
+            args = _build_args(
+                input_dir, output, status_events=status,
+                replay_pause_events=True, pause_delay_min_ms=0,
+            )
+            v2_builder.build(args)
+
+            rows = [json.loads(line) for line in open(output, encoding="utf-8")]
+            self.assertEqual(rows[0]["agent_hint"]["agent_status"]["state"], "pause")
+            self.assertEqual(rows[0]["delay_after_ms"], 3000)
+            self.assertEqual(rows[1]["agent_hint"]["agent_status"]["state"], "pause")
+            self.assertTrue(rows[1]["resume_before"])
+            self.assertEqual(rows[1]["delay_after_ms"], 3000)
+            self.assertTrue(rows[2]["resume_before"])
+            self.assertIsNone(rows[2]["delay_after_ms"])
+            self.assertEqual(rows[3]["agent_hint"]["agent_status"]["state"], "finalize")
+            report = json.load(open(output + ".report.json", encoding="utf-8"))
+            self.assertEqual(report["pause_event_replay"]["applied"], 2)
+            self.assertEqual(report["pause_event_replay"]["resume_before_rows"], 2)
 
     def test_tokenizer_context_trim_and_drop(self):
         with tempfile.TemporaryDirectory() as tmp:

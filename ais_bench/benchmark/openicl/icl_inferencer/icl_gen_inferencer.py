@@ -92,6 +92,10 @@ class GenInferencer(BaseApiInferencer, BaseLocalInferencer):
         # delay_after_ms is an inter-request delay consumed by the session-aware
         # worker after this request completes; never forward it to the body.
         data.pop("delay_after_ms", None)
+        # resume_before asks the session-aware worker to POST a running status
+        # before this request even when the in-band state is not resume. It is
+        # used to replay consecutive real pause events; never forward it.
+        data.pop("resume_before", None)
         # ---- 控制面请求检测（必须在 pop agent_hint 之前） ----
         # manage_request=True 的请求是纯控制面请求（如 evict），服务器端
         # 不执行推理，只执行 edits。这类请求不应计入性能统计，且在

@@ -143,9 +143,10 @@ def _expected_status_events(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             continue
         state = lifecycle_state_of(hint).lower()
         sid = session_id_of(hint)
-        if state in {"resume", "start"}:
+        resume_before = bool(row.get("resume_before"))
+        if state in {"resume", "start"} or resume_before:
             events.append({"data_id": index, "session_id": sid, "state": "running", "when": "before"})
-        elif state in {"pause", "suspend", "tool", "finalize", "end"}:
+        if state in {"pause", "suspend", "tool", "finalize", "end"}:
             wire_state = "finalize" if state == "end" else state
             events.append({"data_id": index, "session_id": sid, "state": wire_state, "when": "after"})
     return events

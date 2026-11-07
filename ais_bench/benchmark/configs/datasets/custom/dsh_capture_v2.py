@@ -8,7 +8,8 @@ from ais_bench.benchmark.datasets import CustomDataset
 #     --input-dir <capture>/model_io --output <run>/dataset_v2.jsonl \
 #     --builder capture --status-events <capture>/status.jsonl ...
 # A `current` symlink is convenient for repeated A/B runs.
-TRACE_DATASET = "/home/t00887700/benchmark-data/agent_capture_dsh/current/dataset_v2.jsonl"
+_DATA_DIR = __import__("os").environ.get("AGENT_HINT_CAPTURE_DIR", "/home/t00887700/benchmark-data/agent_capture_dsh/current")
+TRACE_DATASET = _DATA_DIR + "/dataset_v2.jsonl"
 
 dsh_capture_v2_reader_cfg = dict(
     input_columns=["question", "max_out_len", "timestamp"],

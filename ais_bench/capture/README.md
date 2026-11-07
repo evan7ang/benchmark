@@ -52,6 +52,17 @@ python -m ais_bench.capture build \
   --builder capture --state-mode running
 ```
 
+Replay real pause/tool events:
+
+```bash
+python -m ais_bench.capture build \
+  --input-dir captures/dsh_on/model_io \
+  --output datasets/dsh_on_v2.jsonl \
+  --builder capture --state-mode completed-finalize \
+  --status-events captures/dsh_on/status_events.jsonl \
+  --replay-pause-events
+```
+
 `--builder capture` preserves the full captured hint (session/agent_type/
 call_index/priority/cache_control/prediction/agent_status). `--builder jiuwen`
 uses the legacy Jiuwen model_io converter.
@@ -63,9 +74,10 @@ Use the v2 model configs from the parent branch:
 - ON:  `vllm_api_general_stream_session_hint_v2_trace`
 - OFF: `vllm_api_general_stream_session_hint_v2_trace_off`
 
-`use_timestamp=True` reproduces the captured arrival pacing; for capture
-datasets built here it can compute a very long first delay, so controlled A/B
-runs should set `use_timestamp=False`.
+`use_timestamp=True` reproduces the captured arrival pacing. Both the
+request-level and session-aware paths consume timestamps via the token bucket;
+for controlled A/B runs `use_timestamp=False` is still recommended to avoid a
+long first gap.
 
 ## Hints ON / OFF
 
@@ -92,13 +104,12 @@ DSH example notes.
   is the captured completion token count (capped by `--completion-token-cap`).
 - The builder fills every optional column on every row (null when absent) so
   old `datasets.Dataset.from_list` versions do not drop later-only columns.
-- DSH emits `pause`/`running` out-of-band on `status.jsonl`; the current V2
-  replay consumes request-header `running`/`resume` plus merged `finalize`, not
-  timed `pause` events. Replaying tool-wait pause/offload needs a timed status
-  event channel (or `status_before/status_after`).
-- Motor's current `cache_control` parser expects a dict, while the v2 header
-  carries the spec's list form; the list is currently ignored (WARNING). The
-  dataset is faithful; the consumer needs a small fix.
+- DSH emits `pause`/`running` out-of-band on `status.jsonl`. Use
+  `build --status-events ... --replay-pause-events` to map real pause/tool
+  events to AISBench pause/resume rows (`delay_after_ms` + `resume_before`).
+  Without it, only `finalize` is merged.
+- `cache_control` is single-dict only. Do not generate the v2 list form for
+  Motor replay; the static validator rejects lists.
 - Auxiliary calls (session-title, compaction) carry no hint; with `--hints on`
   they are dropped from the dataset so the replay never fabricates a hint the
   harness did not send.
@@ -184,3 +195,15 @@ Notes:
 - Example: `examples/dify_hint_service.py` (env-driven).
 - The app's agent-hints provider endpoint must point at the recorder
   (`hint-mock-model` -> `http://hint-mock:9999/v1`).
+
+## No-GPU CI and reporting
+
+```bash
+bash tests/agent_hint/run_agent_hint_ci.sh
+QUICK=1 bash tests/agent_hint/run_agent_hint_ci.sh
+```
+
+This runs the data manifest, static dataset validation, unit tests, mock
+send-side conformance, session-aware timestamp pacing, and pause-event replay.
+Use `tests/agent_hint/report_perf.py` or `tests/agent_hint/run_perf_ab.sh` for
+ON/OFF performance reports.

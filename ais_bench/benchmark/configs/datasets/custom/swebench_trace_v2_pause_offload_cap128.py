@@ -3,7 +3,8 @@ from ais_bench.benchmark.openicl.icl_retriever import ZeroRetriever
 from ais_bench.benchmark.openicl.icl_inferencer import GenInferencer
 from ais_bench.benchmark.datasets import CustomDataset
 
-TRACE_DATASET = "/home/t00887700/kv-hint/.build/aisbench/data/swebench_full50_v2_pause_offload_cap128.jsonl"
+_DATA_DIR = __import__("os").environ.get("AGENT_HINT_LOCAL_DATA_DIR", "/home/t00887700/kv-hint/.build/aisbench/data")
+TRACE_DATASET = _DATA_DIR + "/swebench_full50_v2_pause_offload_cap128.jsonl"
 
 swebench_trace_v2_pause_offload_reader_cfg = dict(
     input_columns=["question", "max_out_len", "timestamp"],

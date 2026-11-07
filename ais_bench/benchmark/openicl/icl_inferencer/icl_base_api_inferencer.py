@@ -804,7 +804,7 @@ class BaseApiInferencer(BaseInferencer):
                     hint = data.get("agent_hint") or {}
                     is_v2 = is_v2_agent_hint(hint)
                     state = self._data_lifecycle_state(data)
-                    if is_v2 and self._data_is_resume(data):
+                    if is_v2 and (self._data_is_resume(data) or data.get("resume_before")):
                         await self._report_agent_status(session, data, "running")
 
                     is_offload = self._data_has_offload_edit(data)

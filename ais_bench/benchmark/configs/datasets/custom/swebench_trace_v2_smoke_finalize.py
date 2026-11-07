@@ -3,7 +3,8 @@ from ais_bench.benchmark.openicl.icl_retriever import ZeroRetriever
 from ais_bench.benchmark.openicl.icl_inferencer import GenInferencer
 from ais_bench.benchmark.datasets import CustomDataset
 
-TRACE_DATASET = "/home/t00887700/benchmark-data/agent_replay_v2/swebench_smoke_v2_finalize.jsonl"
+_DATA_DIR = __import__("os").environ.get("AGENT_HINT_DATA_DIR", "/home/t00887700/benchmark-data/agent_replay_v2")
+TRACE_DATASET = _DATA_DIR + "/swebench_smoke_v2_finalize.jsonl"
 
 swebench_trace_v2_reader_cfg = dict(
     input_columns=["question", "max_out_len", "timestamp"],

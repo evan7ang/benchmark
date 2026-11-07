@@ -50,6 +50,12 @@ python ais_bench/datasets/agent/build_agent_dataset_v2_pause.py \
 
 > 修正点：pause 放在 session 的第 N 个请求（1-based）上，下一请求改为 resume；最后一行永远不会被改成 resume。因此一个 session 至少需要 N+2 个请求才能容纳 pause → resume → finalize。不要强行把未 finalize 的 session 改成 finalize。
 
+> 如果输入是真实 harness 抓包（带 `status_events.jsonl`），也可以直接用
+> `python -m ais_bench.capture build ... --status-events <status.jsonl> --replay-pause-events`
+> 生成 pause/resume 行：pause 事件会落到前一个请求，下一请求带
+> `resume_before=True`，AISBench 会在请求后上报 pause、等待 `delay_after_ms`，
+> 再在下一请求前上报 running。
+
 ## 2. 数据集配置
 
 ```shell

@@ -17,3 +17,4 @@ ais_bench/datasets/**
 !ais_bench/datasets/**/
 !ais_bench/datasets/**/*.py
 !ais_bench/datasets/agent/example_v2.jsonl
+!ais_bench/datasets/agent/validate_agent_hint_dataset.py

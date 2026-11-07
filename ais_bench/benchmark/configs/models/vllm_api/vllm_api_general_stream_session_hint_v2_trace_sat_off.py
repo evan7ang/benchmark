@@ -1,8 +1,6 @@
-import os
-
 from ais_bench.benchmark.models import VLLMCustomAPI
 
-_C = int(os.environ.get("SAT_C", "16"))
+_C = int(__import__("os").environ.get("SAT_C", "16"))
 
 models = [
     dict(
@@ -32,8 +30,8 @@ models = [
         request_rate=0,
         retry=2,
         api_key="",
-        host_ip="127.0.0.1",
-        host_port=19025,
+        host_ip=__import__("os").environ.get("AISBENCH_HOST_IP", "127.0.0.1"),
+        host_port=int(__import__("os").environ.get("AISBENCH_HOST_PORT", "19025")),
         url="",
         max_out_len=4096,
         generation_kwargs=dict(

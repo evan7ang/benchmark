@@ -1,0 +1,8 @@
+results/*
+!results/.gitignore
+__pycache__/
+*.pyc
+kvc_test.env
+work/
+dist/
+VERSION

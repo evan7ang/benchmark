@@ -64,11 +64,12 @@ def run_one(task: dict, args, run_dir: str) -> dict:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     endpoint = f"http://127.0.0.1:{port}/v1"
+    status_log = os.path.join(run_dir, "status_events.jsonl")
     env = os.environ.copy()
     env.update({
         "CAPTURE_ENDPOINT": endpoint,
         "CAPTURE_LOG": log,
-        "CAPTURE_STATUS_LOG": os.path.join(run_dir, "status_events.jsonl"),
+        "CAPTURE_STATUS_LOG": status_log,
         "CAPTURE_RUN_ID": task["task_id"],
         "CAPTURE_TASK_ID": task["task_id"],
         "CAPTURE_PROMPT": task["prompt"],
@@ -99,7 +100,8 @@ def run_one(task: dict, args, run_dir: str) -> dict:
         if os.path.exists(report_path):
             stats = json.load(open(report_path, encoding="utf-8"))
     return {"task_id": task["task_id"], "returncode": rc, "duration_s": duration,
-            "requests_log": log, "model_io": mi_out, "capture": stats}
+            "requests_log": log, "status_events": status_log if os.path.exists(status_log) else None,
+            "model_io": mi_out, "capture": stats}
 
 
 def run_batch(args) -> int:
@@ -131,12 +133,29 @@ def run_batch(args) -> int:
               f"sessions={res['capture'].get('sessions')}", flush=True)
 
     dataset = os.path.join(args.out, "dataset_v2.jsonl")
+    merged_status = os.path.join(args.out, "status_events.jsonl")
+    status_paths = [res["status_events"] for res in runs if res.get("status_events")]
+    with open(merged_status, "w", encoding="utf-8") as out:
+        for path in status_paths:
+            with open(path, encoding="utf-8") as src:
+                for line in src:
+                    if line.strip():
+                        out.write(line if line.endswith("\n") else line + "\n")
+    has_status = os.path.exists(merged_status) and os.path.getsize(merged_status) > 0
     builder_report = None
     if os.listdir(merged):
-        ns = argparse.Namespace(input_dir=merged, output=dataset, report=None,
-                                default_max_out_len=args.default_max_out_len,
-                                completion_token_cap=args.completion_token_cap,
-                                state_mode="running")
+        ns = argparse.Namespace(
+            input_dir=merged, output=dataset, report=None,
+            default_max_out_len=args.default_max_out_len,
+            completion_token_cap=args.completion_token_cap,
+            state_mode="completed-finalize" if has_status else "running",
+            status_events=merged_status if has_status else None,
+            tokenizer=None,
+            max_context=None,
+            skip_tokenizer_check=False,
+            replay_pause_events=getattr(args, "replay_pause_events", False),
+            pause_delay_min_ms=getattr(args, "pause_delay_min_ms", 0),
+        )
         v2_build(ns)
         rp = dataset + ".report.json"
         if os.path.exists(rp):
@@ -156,6 +175,7 @@ def run_batch(args) -> int:
         "runs": runs,
         "dataset": os.path.abspath(dataset) if os.path.exists(dataset) else None,
         "dataset_sha256": sha256(dataset) if os.path.exists(dataset) else None,
+        "status_events": os.path.abspath(merged_status) if has_status else None,
         "builder_report": builder_report,
     }
     manifest_path = os.path.join(args.out, "dataset.manifest.json")

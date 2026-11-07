@@ -26,7 +26,7 @@ agent_session_hint_v2_datasets = [
     dict(
         abbr="agent-session-hint-v2",
         type=CustomDataset,
-        path="ais_bench/datasets/agent/example_v2.jsonl",
+        path=__import__("os").environ.get("AGENT_HINT_EXAMPLE_V2", "ais_bench/datasets/agent/example_v2.jsonl"),
         reader_cfg=agent_session_hint_v2_reader_cfg,
         infer_cfg=agent_session_hint_v2_infer_cfg,
         eval_cfg=agent_session_hint_v2_eval_cfg,

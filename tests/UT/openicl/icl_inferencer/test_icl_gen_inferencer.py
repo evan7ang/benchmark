@@ -466,6 +466,50 @@ class TestGenInferencer(unittest.TestCase):
         # worker still sees the control field afterwards.
         self.assertEqual(data["delay_after_ms"], 40000)
 
+    @mock.patch("ais_bench.benchmark.openicl.icl_inferencer.icl_base_inferencer.build_model_from_cfg")
+    @mock.patch("ais_bench.benchmark.openicl.icl_inferencer.icl_base_inferencer.model_abbr_from_cfg", return_value="mabbr")
+    def test_do_request_pops_resume_before(self, m_abbr, m_build):
+        """resume_before is a session-worker control field, not request body data."""
+        class KwargsCapturingModel:
+            def __init__(self):
+                self.kwargs = None
+
+            def parse_template(self, p, mode="gen"):
+                return p
+
+            async def generate(self, inputs, max_out_len, output=None, session=None, **kwargs):
+                self.kwargs = kwargs
+                if output is not None:
+                    output.success = True
+                    output.content = "ok"
+
+        cap = KwargsCapturingModel()
+        m_build.return_value = cap
+        inf = GenInferencer(model_cfg={}, batch_size=1, pass_agent_hint=True)
+        inf.status_counter = DummyStatusCounter()
+        inf.output_handler.report_cache_info = mock.AsyncMock(return_value=True)
+
+        data = {
+            "index": 0,
+            "prompt": "test_input",
+            "data_abbr": "test",
+            "max_out_len": 10,
+            "gold": "test_gold",
+            "resume_before": True,
+            "agent_hint": {
+                "session": {"session_id": "s-1", "epoch": 0},
+                "agent_status": {"state": "pause"},
+            },
+        }
+
+        async def run_test():
+            await inf.do_request(data, mock.Mock(), mock.Mock())
+
+        asyncio.run(run_test())
+
+        self.assertNotIn("resume_before", cap.kwargs)
+        self.assertTrue(data["resume_before"])
+
 
 if __name__ == '__main__':
     unittest.main()

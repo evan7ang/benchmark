@@ -262,6 +262,19 @@ python -m ais_bench.capture build \
   --completion-token-cap 256
 ```
 
+需要回放真实 harness 的 pause/tool 事件时：
+
+```shell
+python -m ais_bench.capture build \
+  --input-dir captures/my_run/model_io \
+  --output datasets/my_run_v2.jsonl \
+  --builder capture \
+  --state-mode completed-finalize \
+  --status-events captures/my_run/status_events.jsonl \
+  --replay-pause-events \
+  --skip-tokenizer-check
+```
+
 ### 7.2 参数说明
 
 | 参数 | 说明 |
@@ -274,6 +287,11 @@ python -m ais_bench.capture build \
 | `--state-mode completed-finalize` | 每个 session 最后一条记录的 `agent_status.state` 改为 `finalize` |
 | `--default-max-out-len` | 无 usage 时的默认最大输出长度，默认 256 |
 | `--completion-token-cap` | 按 usage 推导 `max_out_len` 时的上限，默认 256 |
+| `--status-events` | `status.jsonl` 带外事件；用于真实 finalize 和 pause 回放 |
+| `--replay-pause-events` | 把真实 pause/tool 事件转成 AISBench pause/resume 行 |
+| `--pause-delay-min-ms` | 回放 pause 时 `delay_after_ms` 的下限 |
+| `--tokenizer` / `--max-context` | tokenizer 级上下文校验与裁剪 |
+| `--skip-tokenizer-check` | 显式跳过上下文校验（不推荐） |
 | `--report` | 自定义报告路径 |
 
 `--builder capture` 会保留以下 hint 字段：
@@ -305,7 +323,9 @@ python -m ais_bench.capture build \
   "messages": "[...]",
   "tools": "[...]",
   "agent_hint": {},
-  "tool_choice": "auto"
+  "tool_choice": "auto",
+  "delay_after_ms": null,
+  "resume_before": null
 }
 ```
 
@@ -313,7 +333,11 @@ python -m ais_bench.capture build \
 
 - `messages` 和 `tools` 以 JSON 字符串保存，避免 Arrow struct 补 `None`。
 - `max_out_len` 来自 capture 的完成 token 数，并受 `--completion-token-cap` 限制。
-- `timestamp` 来自抓包时间，用于 `use_timestamp=True` 回放。
+- `timestamp` 来自抓包时间；request-level 和 session-aware 回放都会通过
+  `TokenProducer`/token bucket 按到达时间放行。
+- `delay_after_ms` 只出现在 pause/suspend/tool 行，控制 pause 后的 idle 等待。
+- `resume_before=True` 表示该请求前要先上报 running，用于连续 pause 事件回放。
+- `cache_control` 当前只支持单个 dict，不支持 list。
 
 ## 8. Hints ON / OFF 对比
 
@@ -390,23 +414,16 @@ datasets/
 3. `requests.jsonl` 可能包含完整 prompt 和业务数据，需注意存放、脱敏和访问权限。
 4. Hints OFF 依赖 `x-deepseek-harness-session-id`；没有该 header 时必须通过 `--session-id` 指定兜底 session。
 5. `--state-mode completed-finalize` 是基于每个 session 的最后一条记录派生，不是从 harness 生命周期中真实观测到的 finalize。
-6. 已知限制：Motor 当前 `cache_control` 解析器期望 dict，而 V2 Header 规范中是 list 形式，当前会被忽略并打印 WARNING；数据集本身保留原始内容，需要消费端后续适配。
-7. capture 数据集使用 `use_timestamp=True` 时可能产生很长的首个延迟，受控对比建议关闭时间戳回放。
+6. `cache_control` 当前只支持单个 dict。不要为 Motor 回放生成 list 形式；静态校验器会把 list 判为错误。
+7. capture 数据集使用 `use_timestamp=True` 时可能产生很长的首个延迟；受控 A/B 仍建议关闭时间戳回放。session-aware 回放本身已支持 timestamp 放行。
 
-## 11. 相关文档
-
-- Agent Hint V2 测评指南：`session_aware_agent_hint_v2.md`
-- Agent Hint V2 数据集说明：`session_aware_agent_hint_v2_dataset.md`
-- 模块 README：`ais_bench/capture/README.md`
-
-
-## 12. 真实 DSH 任务批量采集
+## 11. 真实 DSH 任务批量采集
 
 单个 smoke 任务可使用 `run`。批量真实任务推荐使用远端 `batch` 子命令：
 每个 task 独立 recorder、独立 `model_io/`，最终合并为一份 V2 数据集和
 manifest。
 
-### 12.1 Task manifest
+### 11.1 Task manifest
 
 `tasks.jsonl` 每行一个任务，最少字段：
 
@@ -422,7 +439,7 @@ manifest。
 | `prompt` | 首轮任务描述，必填 |
 | `turns` | 该任务的轮数，默认取 `--turns` |
 
-### 12.2 DSH 一次性环境
+### 11.2 DSH 一次性环境
 
 当前验证组合：
 
@@ -449,7 +466,7 @@ node "$DSH_BIN" plugin --profile capture add /home/t00887700/dsh-agent-hints
 > `dsh plugin add` 需要 Linux 可用的 `pnpm`；在 `node:22-bookworm` 中可先
 > `npm install -g pnpm@9.15.0`。
 
-### 12.3 批量运行
+### 11.3 批量运行
 
 ```shell
 PYTHONPATH=/home/t00887700/benchmark \
@@ -491,7 +508,7 @@ python -m ais_bench.capture batch \
 `batch` 会把每个 task 的 status sink finalize 应用到该 session 的最后一条请求，
 因此 `dataset_v2.jsonl` 中的 `finalize` 来自真实 status 事件，而不是按最后一行推导。
 
-### 12.4 校验数据集
+### 11.4 校验数据集
 
 ```shell
 python -m ais_bench.capture validate \
@@ -505,7 +522,7 @@ python -m ais_bench.capture validate \
 --require-finalize
 ```
 
-### 12.5 回放
+### 11.5 回放
 
 同一份 ON 数据集复用于所有对照臂：
 
@@ -528,15 +545,14 @@ ln -sfn /home/t00887700/benchmark-data/agent_capture_dsh/<run-id> \
         /home/t00887700/benchmark-data/agent_capture_dsh/current
 ```
 
-> 注意：当前 `session_aware=True` 的回放循环不消费 `timestamp`，`use_timestamp`
-> 只在请求级路径生效。hints on 的受控 A/B 建议保持 `use_timestamp=False`，
-> 用 `session_concurrency` ramp；若需要复现真实到达节奏，需要另行给
-> session-aware dispatcher 增加时间戳调度。
+> `session_aware=True` 的回放通过 `TokenProducer`/token bucket 消费
+> `timestamp`，可以复现真实到达节奏。受控 A/B 仍建议 `use_timestamp=False`
+> 以避免首条长间隔；需要按真实轨迹回放时再打开。
 
 KVC-off 对照仍使用 ON 模型配置，只关闭 Motor 的
 `kvc_lifecycle_config.enabled`。
 
-### 12.6 真实任务注意事项
+### 11.6 真实任务注意事项
 
 1. 当前主干 `batch` 不负责解压离线仓库快照、初始化 git baseline 或挂载
    workspace；这些由 harness 脚本或外部任务准备流程完成。离线 SWE-bench
@@ -551,7 +567,58 @@ KVC-off 对照仍使用 ON 模型配置，只关闭 Motor 的
    失败，建议重启后重跑该 task。
 5. 真实模型可能把 `max_tokens` 全部用于 thinking；按目标部署设置
    `CAPTURE_MAX_TOKENS` / `CAPTURE_THINKING` / `CAPTURE_REASONING_EFFORT`。
-6. DSH 的 `pause`/`running` 是带外 status 事件，不一定出现在请求头。当前 V2
-   回放只消费请求头里的 `running`/`resume` 和合并后的 `finalize`；
-   `status_events.jsonl` 会保留，但不会按时间重放 `pause`。
+6. DSH 的 `pause`/`running` 是带外 status 事件，不一定出现在请求头。使用
+   `build --status-events ... --replay-pause-events` 可以把真实 pause/tool
+   事件映射为 pause/resume 行，AISBench 会在请求后上报 pause、等待
+   `delay_after_ms`，并在下一请求前上报 running。未启用该选项时只保留
+   finalize。
 7. 真实抓包包含仓库代码和工具输出，注意目录权限、脱敏和保存周期。
+
+## 12. 本地 CI、发送侧一致性与报告工具
+
+仓库提供以下无 GPU 工具：
+
+| 工具 | 作用 |
+|---|---|
+| `tests/agent_hint/data_manifest.py` | 检查数据集/抓包资产是否存在，输出 manifest |
+| `tests/agent_hint/run_agent_hint_ci.sh` | 一键跑 manifest + 静态校验 + 单测 + mock conformance |
+| `tests/agent_hint/run_send_side_conformance.sh` | mock 发送侧一致性、timestamp pacing、pause 事件回放 |
+| `ais_bench/datasets/agent/validate_agent_hint_dataset.py` | 静态 hint/schema/状态机校验 |
+| `ais_bench/datasets/agent/check_send_side.py` | Header/status 发送侧与数据集比对 |
+| `tests/agent_hint/report_perf.py` | ON/OFF 性能结果 Markdown/JSON 报告 |
+| `tests/agent_hint/run_perf_ab.sh` | 对已运行 Motor 执行 ON/OFF 并自动出报告 |
+
+快速执行：
+
+```shell
+# 无 GPU CI
+bash tests/agent_hint/run_agent_hint_ci.sh
+
+# 只跑快速 conformance
+QUICK=1 bash tests/agent_hint/run_agent_hint_ci.sh
+
+# 真实 Motor 已运行时，跑 ON/OFF 并出报告
+AISBENCH_HOST_PORT=19025 MOTOR_METRICS_URL=http://127.0.0.1:19027/metrics \
+  bash tests/agent_hint/run_perf_ab.sh
+```
+
+配置路径可通过环境变量覆盖：
+
+| 环境变量 | 默认 | 作用 |
+|---|---|---|
+| `AGENT_HINT_DATA_DIR` | `/home/t00887700/benchmark-data/agent_replay_v2` | v2 回放数据集根目录 |
+| `AGENT_HINT_CAPTURE_DIR` | `/home/t00887700/benchmark-data/agent_capture_dsh/current` | 真实 harness 抓包数据集 |
+| `AGENT_HINT_LOCAL_DATA_DIR` | `/home/t00887700/kv-hint/.build/aisbench/data` | 本地 sat/quick 数据 |
+| `AGENT_HINT_EXAMPLE_V2` | 仓库内 `example_v2.jsonl` | 合成生命周期样例 |
+| `AISBENCH_HOST_IP` / `AISBENCH_HOST_PORT` | 各配置默认值 | Motor/引擎地址 |
+| `AISBENCH_AGENT_HINT_AUDIT_PATH` | 未设置 | 开启发送侧审计 |
+
+> 注意：AISBench 的 mmengine config 使用 lazy-import，配置文件中不能直接
+> `import os` 后调用 `os.environ.get`；仓库配置统一使用
+> `__import__("os").environ.get(...)` 读取上述环境变量。
+
+## 13. 相关文档
+
+- Agent Hint V2 测评指南：`session_aware_agent_hint_v2.md`
+- Agent Hint V2 数据集说明：`session_aware_agent_hint_v2_dataset.md`
+- 模块 README：`ais_bench/capture/README.md`

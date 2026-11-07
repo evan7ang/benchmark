@@ -25,7 +25,7 @@ import json
 import os
 import statistics
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 
 EXCLUDED_REQUEST_FIELDS = {
     "messages",
@@ -80,6 +80,132 @@ def _load_status_events(path):
                 finalized.add(str(sid))
                 events[str(sid)] = event
     return counts, finalized, events
+
+
+def _load_all_status_events(path):
+    """Return {session_id: [event, ...]} sorted by state_since_ms.
+
+    Used by ``--replay-pause-events`` to turn real harness pause/tool events
+    into AISBench pause/resume rows.
+    """
+    events_by_sid = defaultdict(list)
+    if not path or not os.path.exists(path):
+        return events_by_sid
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except Exception:
+                continue
+            status = event.get("agent_status") or {}
+            sid = (event.get("session") or {}).get("session_id")
+            state = status.get("state")
+            event_time = status.get("state_since_ms")
+            if not sid or not state or event_time is None:
+                continue
+            try:
+                event_time = int(event_time)
+            except (TypeError, ValueError):
+                continue
+            events_by_sid[str(sid)].append({
+                "time": event_time,
+                "state": str(state).lower(),
+                "event": event,
+            })
+    for sid in events_by_sid:
+        events_by_sid[sid].sort(key=lambda item: item["time"])
+    return events_by_sid
+
+
+def _set_state(row, state):
+    hint = row.get("agent_hint")
+    if not isinstance(hint, dict):
+        hint = {}
+        row["agent_hint"] = hint
+    status = dict(hint.get("agent_status") or {})
+    status["state"] = state
+    hint["agent_status"] = status
+
+
+def _replay_pause_events(records, events_by_sid, args):
+    """Map real pause/tool status events to pause/resume rows.
+
+    For a pause event at ``t`` we pause the last request that started before
+    ``t`` and mark the next request with ``resume_before=True``; the next
+    request is still allowed to be a pause row itself, so consecutive tool
+    waits are representable.
+    """
+    stats = {
+        "enabled": True,
+        "applied": 0,
+        "skipped": 0,
+        "skip_reasons": Counter(),
+        "delay_ms": [],
+        "resume_before_rows": 0,
+    }
+    min_delay = max(0, int(getattr(args, "pause_delay_min_ms", 0) or 0))
+    by_sid = defaultdict(list)
+    for index, item in enumerate(records):
+        by_sid[item["sid"]].append(index)
+
+    applied_prev = set()
+    for sid, indexes in by_sid.items():
+        indexes.sort(key=lambda idx: (records[idx]["timestamp"], records[idx]["ordinal"]))
+        events = events_by_sid.get(sid, [])
+        if not events:
+            continue
+        for event in events:
+            if event["state"] not in ("pause", "suspend", "tool"):
+                continue
+            event_time = event["time"]
+            previous_local = None
+            for local, record_index in enumerate(indexes):
+                if records[record_index]["timestamp"] <= event_time:
+                    previous_local = local
+                else:
+                    break
+            if previous_local is None:
+                stats["skipped"] += 1
+                stats["skip_reasons"]["no_previous_request"] += 1
+                continue
+            if previous_local + 1 >= len(indexes):
+                stats["skipped"] += 1
+                stats["skip_reasons"]["no_next_request"] += 1
+                continue
+            prev_index = indexes[previous_local]
+            next_index = indexes[previous_local + 1]
+            prev_row = records[prev_index]["row"]
+            next_row = records[next_index]["row"]
+            prev_state = str(((prev_row.get("agent_hint") or {}).get("agent_status") or {}).get("state", "")).lower()
+            next_state = str(((next_row.get("agent_hint") or {}).get("agent_status") or {}).get("state", "")).lower()
+            if prev_state == "finalize" or next_state == "finalize":
+                stats["skipped"] += 1
+                stats["skip_reasons"]["finalize_boundary"] += 1
+                continue
+            if prev_index in applied_prev:
+                stats["skipped"] += 1
+                stats["skip_reasons"]["previous_row_already_paused"] += 1
+                continue
+            if next_row.get("resume_before"):
+                stats["skipped"] += 1
+                stats["skip_reasons"]["next_row_already_resumed"] += 1
+                continue
+            delay_ms = max(0, int(records[next_index]["timestamp"]) - event_time)
+            if min_delay > 0:
+                delay_ms = max(delay_ms, min_delay)
+            _set_state(prev_row, "pause")
+            prev_row["delay_after_ms"] = delay_ms
+            next_row["resume_before"] = True
+            applied_prev.add(prev_index)
+            stats["applied"] += 1
+            stats["delay_ms"].append(delay_ms)
+            stats["resume_before_rows"] += 1
+    stats["skip_reasons"] = dict(stats["skip_reasons"])
+    stats["delay_ms"] = _stat(stats["delay_ms"])
+    return stats
 
 
 def _load_tokenizer(path):
@@ -276,6 +402,16 @@ def build(args) -> int:
             for sid, item in last_by_sid.items():
                 _set_finalize(item["row"], None)
 
+    # ---- replay real pause/tool events as AISBench pause rows --------------
+    pause_replay = {"enabled": False}
+    if getattr(args, "replay_pause_events", False):
+        status_path = getattr(args, "status_events", None)
+        if not status_path:
+            pause_replay = {"enabled": False, "reason": "missing --status-events"}
+        else:
+            events_by_sid = _load_all_status_events(status_path)
+            pause_replay = _replay_pause_events(records, events_by_sid, args)
+
     # ---- keep optional columns on every row --------------------------------
     all_keys = set()
     for item in records:
@@ -344,6 +480,7 @@ def build(args) -> int:
         "context_dropped": len(context_info["dropped"]),
         "context_trimmed": len(context_info["trimmed"]),
         "context": context_info,
+        "pause_event_replay": pause_replay,
     }
     report_path = args.report or (args.output + ".report.json")
     with open(report_path, "w", encoding="utf-8") as out:
@@ -362,6 +499,10 @@ def main() -> int:
     ap.add_argument("--state-mode", choices=["running", "completed-finalize"], default="running")
     ap.add_argument("--status-events", default=None,
                     help="status.jsonl sink; when set, finalize comes from real events.")
+    ap.add_argument("--replay-pause-events", action="store_true",
+                    help="turn real pause/tool status events into pause/resume rows.")
+    ap.add_argument("--pause-delay-min-ms", type=int, default=0,
+                    help="floor for delay_after_ms written on replayed pause rows.")
     ap.add_argument("--tokenizer", default=None)
     ap.add_argument("--max-context", type=int, default=None)
     ap.add_argument("--skip-tokenizer-check", action="store_true")
