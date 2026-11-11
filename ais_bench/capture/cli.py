@@ -198,6 +198,8 @@ def main() -> int:
     p.add_argument("--hints", choices=["on", "off"], default="on")
     p.add_argument("--out", required=True)
     p.add_argument("--max-tasks", type=int, default=0)
+    p.add_argument("--task-limit", type=int, default=0,
+                   help="alias for --max-tasks")
     p.add_argument("--turns", type=int, default=1)
     p.add_argument("--upstream-host", required=True)
     p.add_argument("--upstream-port", type=int, required=True)
@@ -213,6 +215,37 @@ def main() -> int:
                    help="turn real pause/tool status events into pause/resume rows")
     p.add_argument("--pause-delay-min-ms", type=int, default=0,
                    help="floor for delay_after_ms on replayed pause rows")
+    p.add_argument("--prompt-field", default=None,
+                   help="task field used as prompt (falls back to prompt/problem_statement)")
+    p.add_argument("--case-id-field", default=None,
+                   help="task field used as capture case_id (default: task_id/instance_id)")
+    p.add_argument("--prompt-prefix", default=None,
+                   help="prefix added when the prompt is derived from problem_statement")
+    p.add_argument("--no-prompt-prefix", action="store_true")
+    p.add_argument("--workspace-field", default="workspace_zip",
+                   help="task field containing a per-task workspace archive")
+    p.add_argument("--workspaces-dir", default=None,
+                   help="workspace root (default: <out>/workspaces)")
+    p.add_argument("--init-git", action="store_true",
+                   help="create a baseline git commit in extracted workspaces")
+    p.add_argument("--max-tokens", type=int, default=None,
+                   help="CAPTURE_MAX_TOKENS passed to the harness")
+    p.add_argument("--timeout-s", type=int, default=0,
+                   help="per-task harness timeout in seconds")
+    p.add_argument("--thinking", default=None)
+    p.add_argument("--reasoning-effort", default=None)
+    p.add_argument("--tokenizer", default=None,
+                   help="tokenizer/chat-template path for context validation")
+    p.add_argument("--max-context", type=int, default=None)
+    p.add_argument("--skip-tokenizer-check", action="store_true")
+    p.add_argument("--build-python", default=None,
+                   help="Python executable for the build step when it needs transformers")
+    p.add_argument("--only-successful", action="store_true",
+                   help="also build dataset_v2_success.jsonl from exit=0 tasks")
+    p.add_argument("--skip-existing", action="store_true",
+                   help="reuse existing per-task model_io instead of running again")
+    p.add_argument("--forward-agent-status", action="store_true", default=False,
+                   help="forward DSH /agent-status to the upstream during capture")
     p.add_argument("--allow-failures", action="store_true")
     p.set_defaults(func=cmd_batch)
 

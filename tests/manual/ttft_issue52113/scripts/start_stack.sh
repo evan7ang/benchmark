@@ -193,10 +193,22 @@ cfg = {"motor_coordinator_config": {
     },
     "rate_limit_config": {"enable_rate_limit": False},
     "exception_config": {"first_token_timeout": 1800},
+    "timeout_config": {
+        "request_timeout": 3600,
+        "connection_timeout": 10,
+        "read_timeout": 3600,
+        "write_timeout": 3600,
+        "keep_alive_timeout": 60,
+    },
+    "circuit_config": {
+        "enable": False,
+        "failure_threshold": 3,
+        "base_timeout_s": 30.0,
+        "max_timeout_s": 300.0,
+    },
     "agent_status_config": {"enabled": True, "central_lifecycle": True},
     "kvc_lifecycle_config": {
         "enabled": kvc == "on",
-        "pin_ttl_s": 3600,
         "idle_offload_s": float(idle_offload),
         "idle_evict_s": float(idle_evict),
         "offload_kv_usage_high_water": float(high_water),

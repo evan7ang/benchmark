@@ -120,6 +120,25 @@ def _load_all_status_events(path):
     return events_by_sid
 
 
+def _normalize_cache_control(hint) -> bool:
+    """Motor replay accepts a single cache_control dict, not the list form.
+
+    DSH emits a list; keep the raw capture untouched and normalize only the
+    replay dataset. Returns True when a list was converted/dropped.
+    """
+    if not isinstance(hint, dict):
+        return False
+    value = hint.get("cache_control")
+    if not isinstance(value, list):
+        return False
+    first = value[0] if value and isinstance(value[0], dict) else None
+    if first is None:
+        hint.pop("cache_control", None)
+    else:
+        hint["cache_control"] = first
+    return True
+
+
 def _set_state(row, state):
     hint = row.get("agent_hint")
     if not isinstance(hint, dict):
@@ -263,6 +282,8 @@ def _set_finalize(row, event):
 def build(args) -> int:
     records = []
     skipped = 0
+    cache_control_list_rows = 0
+    cache_control_normalized = 0
     input_paths = sorted(
         p for p in glob.glob(os.path.join(args.input_dir, "*.json"))
         if os.path.basename(p) != "capture.report.json"
@@ -289,6 +310,10 @@ def build(args) -> int:
             skipped += 1
             continue
         hint = json.loads(json.dumps(ah)) if isinstance(ah, dict) and ah else {}
+        if isinstance(hint.get("cache_control"), list):
+            cache_control_list_rows += 1
+            if _normalize_cache_control(hint):
+                cache_control_normalized += 1
         hs = hint.setdefault("session", {})
         hs["session_id"] = sid
         hs["parent_session_id"] = parent
@@ -461,6 +486,8 @@ def build(args) -> int:
         "skipped": skipped,
         "sessions": len(sessions),
         "hint_field_coverage": coverage,
+        "cache_control_original_list_rows": cache_control_list_rows,
+        "cache_control_normalized": cache_control_normalized,
         "body_field_coverage": dict(body_coverage),
         "optional_columns": optional_columns,
         "header_len_max": max(lens) if lens else 0,

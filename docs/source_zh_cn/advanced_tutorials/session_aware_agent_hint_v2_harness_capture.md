@@ -482,12 +482,45 @@ python -m ais_bench.capture batch \
   --env NODE_BIN=node
 ```
 
+真实 SWE-bench 工作区（`tasks.jsonl` 含 `instance_id` / `problem_statement` /
+`workspace_zip`）：
+
+```shell
+PYTHONPATH=/home/t00887700/benchmark \
+python -m ais_bench.capture batch \
+  --tasks /home/t00887700/benchmark-data/agent_capture_dsh/tasks50.jsonl \
+  --task-limit 5 \
+  --harness-cmd "bash /home/t00887700/benchmark/ais_bench/capture/examples/dsh_capture_task.sh" \
+  --hints on \
+  --out /home/t00887700/benchmark-data/agent_capture_dsh/run5 \
+  --upstream-host 127.0.0.1 --upstream-port 19325 --upstream-model kvh \
+  --workspace-field workspace_zip --init-git \
+  --prompt-field problem_statement --case-id-field instance_id \
+  --max-tokens 2048 --timeout-s 900 \
+  --default-max-out-len 2048 --completion-token-cap 2048 \
+  --tokenizer /home/RAG_data/models/Qwen3-8B --max-context 32768 \
+  --replay-pause-events --only-successful --allow-failures \
+  --env DSH_BIN=/home/t00887700/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js \
+  --env DSH_HOME=/home/t00887700/dsh-home \
+  --env DSH_PERMISSION_MODE=danger-full-access
+```
+
 常用参数：
 
 | 参数 | 说明 |
 |---|---|
-| `--max-tasks` | 只运行前 N 个任务，便于 smoke |
+| `--max-tasks` / `--task-limit` | 只运行前 N 个任务，便于 smoke |
 | `--turns` | task 未指定 `turns` 时的默认轮数 |
+| `--workspace-field` | 任务中的工作区压缩包字段，默认 `workspace_zip` |
+| `--workspaces-dir` | 工作区解压根目录，默认 `<out>/workspaces` |
+| `--init-git` | 解压后创建 baseline git commit |
+| `--prompt-field` | 任务 prompt 字段，缺失时回退 `problem_statement` |
+| `--case-id-field` | 指标 case_id 字段，默认 `task_id`/`instance_id` |
+| `--max-tokens` | 透传 `CAPTURE_MAX_TOKENS` |
+| `--timeout-s` | 单任务超时 |
+| `--tokenizer` / `--max-context` | 构建时做上下文校验 |
+| `--only-successful` | 额外产出 `dataset_v2_success.jsonl` |
+| `--skip-existing` | 复用已完成任务的 model_io |
 | `--allow-failures` | 存在失败 task 时仍返回 0 |
 | `--listen-port` | 固定 recorder 端口；Dify 等 provider 需提前配置时使用 |
 
@@ -554,10 +587,12 @@ KVC-off 对照仍使用 ON 模型配置，只关闭 Motor 的
 
 ### 11.6 真实任务注意事项
 
-1. 当前主干 `batch` 不负责解压离线仓库快照、初始化 git baseline 或挂载
-   workspace；这些由 harness 脚本或外部任务准备流程完成。离线 SWE-bench
-   `workspace_zip` / `--init-git` 能力已从主干移除，后续如有需要应移植进
-   `batch.py`，不要长期维护第二套 runner。
+1. `batch` 已内建离线工作区能力：`--workspace-field workspace_zip`
+   （默认）会把每个任务的工作区解压到 `<out>/workspaces/<task_id>/`，
+   `--init-git` 会创建 baseline commit，并通过 `CAPTURE_WORKSPACE` 传给
+   harness。配套 harness 使用 `examples/dsh_capture_task.sh`。不要再维护
+   仓库外的第二套 runner；旧的 `agent-hint/dsh_capture/run_batch.sh` 仅作历史
+   参考，已不再被本仓库调用。
 2. DSH 的 sandbox 默认 `workspace-write` 需要 bubblewrap/Landlock；生产采集
    请按需改回 `workspace-write` 并安装 sandbox backend，或在隔离容器内使用
    `danger-full-access`。
