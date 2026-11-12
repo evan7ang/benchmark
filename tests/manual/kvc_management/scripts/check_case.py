@@ -242,7 +242,10 @@ def main() -> None:
         require(e_counts.get("offload", 0) > 0, "engine has no offload edit")
         require(e_counts.get("prefetch", 0) > 0, "engine has no prefetch edit")
         require(posts.get("pause", 0) > 0, "no pause status posts")
-        require(posts.get("running", 0) > 0, "no resume(running) status posts")
+        # Under the four-state KVC contract (feature/agent-hint-kvc-lifecycle)
+        # the resume signal is posted as wire state "resume"; older benches
+        # folded it into "running". Accept either.
+        require(posts.get("running", 0) + posts.get("resume", 0) > 0, "no resume/running status posts")
     elif case_type == "saturated":
         require(delta["offload_total"] > 0, "offload_total did not increase under saturation")
         require(delta["edit_fail_total"] == 0, "edit_fail > 0")

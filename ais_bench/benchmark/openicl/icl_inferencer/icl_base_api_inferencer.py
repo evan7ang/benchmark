@@ -652,13 +652,15 @@ class BaseApiInferencer(BaseInferencer):
         if not session_id:
             return
         wire_state = str(state).lower()
-        if wire_state == "resume":
-            wire_state = "running"
-        elif wire_state == "start":
+        # The KVC lifecycle contract (feature/agent-hint-kvc-lifecycle) keeps
+        # ``resume`` as a distinct wire state: only an explicit resume
+        # triggers prefetch after an offloaded pause. Keep ``start`` folded
+        # into ``running`` for back-compat.
+        if wire_state == "start":
             wire_state = "running"
         elif wire_state == "end":
             wire_state = "finalize"
-        if wire_state not in ("running", "tool", "pause", "suspend", "finalize"):
+        if wire_state not in ("running", "resume", "tool", "pause", "suspend", "finalize"):
             return
         payload = {
             "session": {"session_id": session_id},
@@ -805,7 +807,12 @@ class BaseApiInferencer(BaseInferencer):
                     is_v2 = is_v2_agent_hint(hint)
                     state = self._data_lifecycle_state(data)
                     if is_v2 and (self._data_is_resume(data) or data.get("resume_before")):
-                        await self._report_agent_status(session, data, "running")
+                        # A real resume row announces "resume" — the wire state
+                        # that triggers prefetch after an offloaded pause under
+                        # the four-state KVC contract. resume_before rows (no
+                        # in-band resume) only announce "running".
+                        pre_state = "resume" if self._data_is_resume(data) else "running"
+                        await self._report_agent_status(session, data, pre_state)
 
                     is_offload = self._data_has_offload_edit(data)
                     is_pause = self._data_is_pause(data)
