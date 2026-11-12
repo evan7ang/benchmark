@@ -1,0 +1,44 @@
+# ais-runner:ais-1 - AISBench runtime image for KVC manual tests.
+#
+# The benchmark source is COPYed at build time so that the `ais_bench` CLI
+# and all python dependencies are installed. At runtime the kit re-mounts the
+# source at /workspace (PYTHONPATH), so the tested code is always the local
+# checkout and AISBench-side changes never require an image rebuild.
+#
+# Build (context must contain the benchmark source as ./benchmark):
+#   mkdir ctx && cp -r <benchmark> ctx/benchmark && cp docker/Dockerfile.ais-runner ctx/Dockerfile
+#   docker build -t ais-runner:ais-1 ctx
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_INDEX_URL=https://repo.huaweicloud.com/repository/pypi/simple \
+    PIP_TRUSTED_HOST=repo.huaweicloud.com \
+    PIP_TIMEOUT=120 \
+    PIP_RETRIES=10
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 python3-pip python3-dev \
+        curl ca-certificates unzip \
+        build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY benchmark /opt/benchmark
+WORKDIR /opt/benchmark
+
+# Upgrade pip first, then install the benchmark package with its pinned deps.
+# cpm_kernels is a CUDA-only optional dependency; tolerate its build failure
+# on ARM by dropping it and retrying.
+RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    (python3 -m pip install --no-cache-dir -e . \
+        || (sed -i '/^cpm_kernels$/d' requirements/runtime.txt \
+            && python3 -m pip install --no-cache-dir -e .)) && \
+    python3 -m pip install --no-cache-dir "transformers>=4.51,<5"
+
+# Smoke checks: CLI entry point + tokenizer stack.
+RUN ais_bench --help >/dev/null 2>&1 && echo "ais_bench CLI OK" && \
+    python3 -c "import transformers; print('transformers', transformers.__version__)"
+
+CMD ["bash"]

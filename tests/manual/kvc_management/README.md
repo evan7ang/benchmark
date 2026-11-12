@@ -116,6 +116,8 @@ kvc_manual_test/
 ├── kvc_test.env.example
 ├── qa_run.sh
 ├── configs/legacy/            # 旧静态配置，仅用于本地对照
+├── docker/
+│   └── Dockerfile.ais-runner  # AIS 镜像（ais-runner:ais-1）构建文件
 ├── scripts/
 │   ├── common.sh              # 配置加载
 │   ├── preflight.sh           # doctor
