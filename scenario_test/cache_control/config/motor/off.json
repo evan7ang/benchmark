@@ -1,0 +1,59 @@
+{
+  "motor_coordinator_config": {
+    "aigw": {
+      "id": "kvh",
+      "p_max_seqlen": 32768,
+      "d_max_seqlen": 32768
+    },
+    "api_config": {
+      "coordinator_api_host": "127.0.0.1",
+      "coordinator_api_infer_port": 19475,
+      "coordinator_api_mgmt_port": 19476,
+      "coordinator_obs_port": 19477
+    },
+    "inference_workers_config": {
+      "num_workers": 1,
+      "worker_metaserver_base_port": 19478
+    },
+    "scheduler_config": {
+      "prefill_scheduler_type": "load_balance",
+      "decode_scheduler_type": "load_balance",
+      "affinity_load_gate_ratio": 0.0,
+      "kv_conductor_config": {
+        "model_path": "/home/RAG_data/models/Qwen3-8B"
+      }
+    },
+    "rate_limit_config": {
+      "enable_rate_limit": false
+    },
+    "exception_config": {
+      "first_token_timeout": 1800
+    },
+    "timeout_config": {
+      "request_timeout": 3600,
+      "connection_timeout": 10,
+      "read_timeout": 3600,
+      "write_timeout": 3600,
+      "keep_alive_timeout": 60
+    },
+    "circuit_config": {
+      "enable": false,
+      "failure_threshold": 3,
+      "base_timeout_s": 30.0,
+      "max_timeout_s": 300.0
+    },
+    "agent_status_config": {
+      "enabled": true,
+      "central_lifecycle": true
+    },
+    "kvc_lifecycle_config": {
+      "enabled": false,
+      "idle_offload_s": 0.0,
+      "idle_evict_s": 0.0,
+      "offload_kv_usage_high_water": 0.0,
+      "prefetch_enabled": true,
+      "metrics_shm_name": "motor_kvc_metrics_ttft52113"
+    },
+    "context_budget_mode": "on"
+  }
+}

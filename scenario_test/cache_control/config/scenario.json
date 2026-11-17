@@ -1,0 +1,127 @@
+{
+  "name": "cache_control_short_pause",
+  "description": "短 pause（60s）+ agent hint（header cache_control）收益验证。每个会话 8 次调用 = 1 冷启 + 7 resume；pause 60s；prompt 8448 token = 66 块。",
+  "dataset": {
+    "prefix": "contend_sp7_p60",
+    "source": "data/source/contend_lru60_S32.jsonl",
+    "generated_dir": "data/generated",
+    "sessions_allowed": [
+      1,
+      4,
+      8,
+      32
+    ],
+    "pause_ms": 60000,
+    "slot_ms": 8000,
+    "stagger_ms": 8000,
+    "max_out_len": 64,
+    "ttl_s": 120,
+    "prompt_tokens": 8448,
+    "blocks_per_session": 66,
+    "sha256": {
+      "contend_sp7_p60_S1.jsonl": "8efda7a7ce9a6f883dd6d5bab9af17f3845bd81e009ab414a9b22260e5ae1346",
+      "contend_sp7_p60_S4.jsonl": "039eabcb4859e6317c4329fb5dc5e3ba51d36d613145b2a82976184942f8c292",
+      "contend_sp7_p60_S8.jsonl": "d509d4332ccc2fb9ead09b0d2b12b03ca178bccaf50422c6a14cfc0507b9d549",
+      "contend_sp7_p60_S32.jsonl": "994336a53213f74fbb1450695eeb45eb11e18b21b0b89fedccbd01be0cee7d9f"
+    }
+  },
+  "capacity_admission": {
+    "rule": "pool_blocks >= 1.05 * sessions * blocks_per_session",
+    "pool_blocks": null,
+    "comment": "pool_blocks=null 时由 02_start_engine.sh 从引擎 banner 读取并写入 results/logs/pool.env"
+  },
+  "matrix": [
+    {
+      "dataset": "contend_sp7_p60_S8.jsonl",
+      "arm": "decl",
+      "repeat": 3
+    },
+    {
+      "dataset": "contend_sp7_p60_S8.jsonl",
+      "arm": "off",
+      "repeat": 3
+    }
+  ],
+  "matrix_notes": {
+    "S8": "32GB 卡（3.2）上的正收益点：需求 8x66=528 块，比值 0.85",
+    "S32": "64GB 卡（169）上的正收益点：需求 2112 块，池子 2031 块，比值 1.04",
+    "S1": "反常点（hint 反向劣化），只用于边界验证，不纳入日常矩阵"
+  },
+  "acceptance": {
+    "V1_arm_selfcheck": true,
+    "V2_http_errors_zero": true,
+    "V3_hint_sent_matches_arm": true,
+    "V4_prefix_cache_reset_200": true,
+    "V5_pool_matches_env": true,
+    "V6_coordinator_pid_stable": true,
+    "V7_identity_hits_plus_prefill_eq_queries": true,
+    "V8_reuse_blocks_sane": true,
+    "half_threshold": "le500 >= 50% of infer requests  <=>  p50 <= 500ms"
+  },
+  "isolation": {
+    "engine_restart": "per_arm",
+    "comment": "切臂必须重启引擎进程：hints-on 流量会污染引擎状态（会话注册表累积/受保护块占窗口/空闲计数虚高），reset_prefix_cache 清不掉，只有重启进程能恢复。per_arm=换臂重启；per_round=每轮重启（最严）；never=只在单臂内连续跑时可用。off 轮若发现同引擎有 hint 历史会自动强制重启。"
+  },
+  "expected": {
+    "clean_engine": {
+      "comment": "引擎在跑该臂前刚重启、未跑过任何 hint 流量",
+      "S8_624blk": {
+        "off_p50_ms": [
+          186,
+          200
+        ],
+        "decl_p50_ms": [
+          200,
+          222
+        ],
+        "note": "hint 是纯开销（+15~20ms）；off 靠自然 LRU 就能活过 60s pause"
+      },
+      "S4_624blk": {
+        "off_p50_ms": [
+          185,
+          200
+        ],
+        "decl_p50_ms": [
+          200,
+          220
+        ]
+      },
+      "S1_624blk": {
+        "off_p50_ms": [
+          195,
+          205
+        ],
+        "decl_p50_ms": [
+          1130,
+          1160
+        ],
+        "note": "反常点：单会话 8 份历史保护块占池 85%，decl 反向劣化"
+      },
+      "S32_2031blk_169": {
+        "off_p50_ms": [
+          971,
+          1124
+        ],
+        "decl_p50_ms": [
+          298,
+          413
+        ],
+        "note": "169 每轮重启引擎；2,112 需求 vs 2,031 池，off 因容量丢失前缀"
+      }
+    },
+    "polluted_engine": {
+      "comment": "同一引擎进程先跑过 decl 再跑 off（未重启）；这是生产混部形态，不是干净基线",
+      "S8_624blk": {
+        "off_p50_ms": [
+          1020,
+          1028
+        ],
+        "decl_p50_ms": [
+          197,
+          220
+        ],
+        "note": "相对差 ~80% 是「混部引擎上 hint 会话对 off 会话的优势」，不能表述为「hint 让场景提速 80%」；污染 2.4h 不自愈"
+      }
+    }
+  }
+}

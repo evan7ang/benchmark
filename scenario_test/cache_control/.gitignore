@@ -1,0 +1,15 @@
+# 本机环境取值（由 env.env.example.sh 复制生成）
+env/env.sh
+
+# 生成数据（用 `make data` 现生成，见 data/README.md）
+data/generated/*
+!data/generated/.gitkeep
+
+# 运行证据与日志
+results/*
+!results/.gitkeep
+
+# 其他
+__pycache__/
+*.pyc
+*.log
