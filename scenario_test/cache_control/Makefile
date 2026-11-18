@@ -2,7 +2,7 @@ SHELL := /bin/bash
 ROOT  := $(shell cd $(dir $(lastword $(MAKEFILE_LIST))) && pwd)
 S     := $(ROOT)/scripts
 
-.PHONY: help env preflight containers engine motor data run matrix matrix-churn matrix-churn-all matrix-mixed analyze verify clean-results
+.PHONY: help env preflight containers engine motor data data-profit run matrix matrix-churn matrix-churn-all matrix-mixed analyze verify clean-results
 
 help:
 	@echo "cache_control 场景测试"
@@ -11,6 +11,7 @@ help:
 	@echo "    make env             # cp env/env.example.sh -> env/env.sh（或 cp env/profiles/<机>.sh）"
 	@echo "    make preflight       # 镜像/模型/卡/数据/驱动/motor 代码版本自检"
 	@echo "    make data            # 从冻结源生成 S1/S4/S8/S32（不入 git）"
+	@echo "    make data-profit     # 生成过订比扫描数据集 bp/gp/gc + _nocc 孪生（逐字节可复现）"
 	@echo "    make containers      # 幂等创建引擎/网关容器（已存在则跳过）"
 	@echo "    make engine          # 起引擎并校验 banner；写 results/logs/pool.env"
 	@echo ""
@@ -43,6 +44,9 @@ motor:
 
 data:
 	@python3 $(ROOT)/data/gen_sp7.py --sessions 1,4,8,32 --churn-intervals-ms 2000,1000,700
+
+data-profit:
+	@python3 $(ROOT)/data/gen_profit.py --ttl 60 --strip-cc
 
 run:
 	@bash $(S)/04_run_one.sh $(DS) $(ARM) $(or $(REP),1) $(or $(LANE),A)

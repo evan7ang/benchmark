@@ -1,0 +1,331 @@
+{
+  "schema": "cache_control.profit_scenarios/1",
+  "updated": "2026-11-18",
+  "author": "kv-hint 短 pause 实测（169 / 3.2 两台 910B4 机器）",
+  "doc": "docs/RESULTS_2026-11-18_profit_map.md",
+  "primary_metric": {
+    "name": "global_mean_ttft_ms",
+    "definition": "某臂一轮内全部 kind=infer 请求的 TTFT 算术平均，live 与 churn 等权",
+    "why": "p50 会把慢会话藏进中位数；off 的坏是长尾坏。诊断口径 p50/p90/每会话分位保留，但不当主判据",
+    "diagnostics": ["p50", "p90", "slow_sessions", "hit_pct", "delta_hits"]
+  },
+  "machines": {
+    "169": {"host": "179.169.2.2", "npu": 2, "engine_port": 18220, "natural_pool_blocks": 2031, "pool_tokens": 259968, "block_size": 128, "gpu_mem_util": 0.9},
+    "3.2": {"host": "179.169.3.2", "npu": 2, "engine_port": 18240, "natural_pool_blocks": 624, "pool_tokens": 79872, "block_size": 128},
+    "570sweep": {"host": "179.169.2.2", "engine_port": 18220, "pool_blocks": 570, "note": "169 上按 POOL_BLOCKS_OVERRIDE 收缩池做 ttl / 池扫描"}
+  },
+  "arms": {
+    "off": "整颗 agent hint 不发（连 session_id 都没有）",
+    "decl": "发 header 全量 hint，但 engine 侧生命周期 keeper 关闭（kvc_lifecycle.enabled=false）",
+    "life": "发 header 全量 hint + 引擎生命周期 keeper 打开"
+  },
+  "quotability_rule": "只有『干净引擎、off 先跑、同引擎相邻跑 decl』的一对可以引用降幅；跨 lane 或前序有 hint 流量的 off 格，其 off 绝对值受钉住残留污染，只能引用 decl 侧的绝对值",
+  "reach_condition": {
+    "text": "收益成立需要三条同时满足：① live 工作集 ≥ ≈0.8× 池（过订）；② 停顿在秒级（本包 pause 8–28 s）；③ 池余量 < 1.3× 受保护集（『比受保护集大 30%』仍会掉悬崖）",
+    "counter_examples": [
+      "gp45@2031（0.45× 池）⇒ +3.9% 中性",
+      "real5_agent12@624（池自足）⇒ p50 反升 1.8%",
+      "s8@1098 / s12@1552（1.3× 安全线）⇒ 8/8、12/12 慢会话"
+    ]
+  },
+  "scenarios": [
+    {
+      "id": "bpdom@2031",
+      "generator": "bpdom",
+      "machine": "169",
+      "pool_blocks": 2031,
+      "pause_s": 28,
+      "live_sessions": 24,
+      "live_rounds": 20,
+      "churn": {"sessions": 6, "rounds": 30},
+      "arms": {
+        "off": {"mean": 2504.1, "p50": 415.6, "p90": 11006.2, "slow_sessions": "0/24", "hit_pct": 60.13, "evidence": "bpdom.A_off_20261118-112348"},
+        "decl": {"mean": 838.9, "p50": 353.3, "p90": 943.1, "slow_sessions": "0/24", "evidence": "bpdom.A_decl_20261118-113256"}
+      },
+      "delta_pct": -66.5,
+      "delta_p90_pct": -91.4,
+      "verdict": "profit",
+      "off_baseline": "clean",
+      "note": "★ 全包最硬的配对：新引擎、off 首格、同引擎相邻跑 decl。off 本身已有 60.13% 命中 ⇒ hint 的作用是『把命中留给还需要它的会话』，不是从零造缓存"
+    },
+    {
+      "id": "bp25@624",
+      "generator": "bp25",
+      "machine": "3.2",
+      "pool_blocks": 624,
+      "pause_s": 28,
+      "live_sessions": 8,
+      "live_rounds": 12,
+      "churn": {"sessions": 12, "rounds": 60},
+      "live_tokens_measured": 64990,
+      "oversub_ratio": 0.81,
+      "arms": {
+        "off": {"mean": 1203.0, "live_slice": 3851.8, "churn_slice": 849.8, "p50": 245.0, "p90": 4700.1, "ge2s": "157/816 (19.2%)", "hit_pct": 0.96, "delta_hits": 15616, "evidence": "bp25_off_20261118-040332"},
+        "decl": {"mean": 322.5, "live_slice": 533.1, "churn_slice": 294.4, "p50": 227.0, "p90": 292.0, "ge2s": "16/816 (2.0%)", "hit_pct": 41.18, "delta_hits": 668928, "evidence": "bp25_decl_20261118-041208"}
+      },
+      "delta_pct": -73.2,
+      "delta_p90_pct": -93.8,
+      "delta_delta_hits": "43x",
+      "verdict": "profit",
+      "off_baseline": "clean",
+      "note": "★ 3.2 侧唯一干净正收益配对（新引擎 04:03 起、off 首跑）。off hit 0.96% 不是污染，是池 624 装不下 0.81× 的 live 集 ⇒ 每次 resume 全量重算"
+    },
+    {
+      "id": "bp45@624",
+      "generator": "bp45",
+      "machine": "3.2",
+      "pool_blocks": 624,
+      "pause_s": 28,
+      "live_sessions": 14,
+      "live_rounds": 12,
+      "churn": {"sessions": 12, "rounds": 60},
+      "oversub_ratio": 1.42,
+      "arms": {
+        "off": {"mean": 2757.6, "n": 888, "live_slice": 6980.5, "churn_slice": 1772.2, "p50": 512.5, "p90": 7279.7, "hit_pct": 0.28, "delta_hits": 15616, "evidence": "bp45_off_20261118-042152"},
+        "decl": null
+      },
+      "verdict": "off-only",
+      "off_baseline": "clean",
+      "note": "过订梯度：1.42× 池让 off 从 1203.0 恶化到 2757.6（×2.29）；delta_hits 与 0.81× 时逐位相同（15,616）⇒ off 臂无会话归属，命中量只由『池装得下多少』决定。decl 格因机器停机中止"
+    },
+    {
+      "id": "bigp_live12@2031",
+      "generator": "bigp_live12",
+      "machine": "169",
+      "pool_blocks": 2031,
+      "pause_s": 28,
+      "live_sessions": 12,
+      "live_rounds": 12,
+      "churn": {"sessions": 12, "rounds": 60},
+      "arms": {
+        "off": {"mean": 3973.4, "p50": 650, "p90": 19669, "slow_sessions": "12/12", "hit_pct": 31.26, "evidence": "bigp_live12.A_off_20261118-090003"},
+        "decl": {"mean": 1018.6, "p50": 377.8, "p90": 819.1, "slow_sessions": "7/12", "hit_pct": 56.87, "evidence": "bigp_live12.A_decl_20261118-090939"}
+      },
+      "delta_pct": -74.4,
+      "delta_p90_pct": -95.8,
+      "verdict": "profit",
+      "off_baseline": "clean",
+      "note": "24k 字符级前缀；p99 只降 2.2%（覆盖条件 f ≥ 1 − q 的样板）"
+    },
+    {
+      "id": "gp25@2031",
+      "generator": "gp25",
+      "machine": "169",
+      "pool_blocks": 2031,
+      "pause_s": 28,
+      "live_sessions": 8,
+      "live_rounds": 12,
+      "churn": {"sessions": 4, "rounds": 22, "chars": 7000},
+      "arms": {
+        "off": {"mean": 1912.2, "slow_sessions": "7/8", "hit_pct": 23.43, "evidence": "gp25.A_off_20261118-101230"},
+        "decl": {"mean": 966.4, "slow_sessions": "0/8", "hit_pct": 50.15, "evidence": "gp25.A_decl_20261118-101751"}
+      },
+      "delta_pct": -49.5,
+      "verdict": "profit-mean-only",
+      "off_baseline": "clean",
+      "note": "live 切片 2317.2 → 726.3（−68.7%），churn 切片只 −16.4% ⇒ 收益落在 live 侧"
+    },
+    {
+      "id": "gp45@2031",
+      "generator": "gp45",
+      "machine": "169",
+      "pool_blocks": 2031,
+      "pause_s": 28,
+      "live_sessions": 14,
+      "live_rounds": 12,
+      "churn": {"sessions": 4, "rounds": 22, "chars": 7000},
+      "arms": {
+        "off": {"mean": 771.8, "slow_sessions": "0/14", "evidence": "gp45.c2_off_20261118-102856"},
+        "decl": {"mean": 801.6, "slow_sessions": "0/14", "evidence": "gp45.c2_decl_20261118-103420"}
+      },
+      "delta_pct": 3.9,
+      "verdict": "neutral",
+      "off_baseline": "residue-suspect",
+      "note": "负对照：off 侧本来就没坏（0 慢会话）⇒ 无从改善。这一行必须留在数据集里，否则『收益』样本没有对照组"
+    },
+    {
+      "id": "bp70@2031",
+      "generator": "bp70",
+      "machine": "169",
+      "pool_blocks": 2031,
+      "pause_s": 28,
+      "live_sessions": 20,
+      "live_rounds": 12,
+      "churn": {"sessions": 12, "rounds": 60},
+      "oversub_ratio": 0.69,
+      "arms": {
+        "off": {"mean": 4223.3, "p50": 487.5, "p90": 12524.7, "slow_sessions": "20/20", "hit_pct": 0.58, "evidence": "bp70.A_off_20261118-093300"},
+        "decl": {"mean": 592.5, "p50": 264.9, "p90": 358.4, "slow_sessions": "0/20", "hit_pct": 62.87, "delta_hits": 1875968, "evidence": "bp70.A_decl_20261118-102408"}
+      },
+      "delta_pct": -86.0,
+      "verdict": "profit-decl-only",
+      "off_baseline": "polluted",
+      "note": "decl 侧 592.5 ms 本身是硬的（另有 nocc 孪生 610.2 ms、hit/delta_hits 与之逐位相同）；off 4223.3 命中 0.58% 属重污染，−86.0% 只作参考不许对外"
+    },
+    {
+      "id": "bp25@2031",
+      "generator": "bp25",
+      "machine": "169",
+      "pool_blocks": 2031,
+      "pause_s": 28,
+      "live_sessions": 8,
+      "live_rounds": 12,
+      "arms": {
+        "off": {"mean": 647.3, "slow_sessions": "5/8", "hit_pct": 59.43, "evidence": "bp25.c2_off_20261118-093300"},
+        "decl": {"mean": 243.6, "slow_sessions": "0/8", "hit_pct": 72.38, "evidence": "bp25.c2_decl_20261118-094113"}
+      },
+      "delta_pct": -62.4,
+      "verdict": "profit-decl-only",
+      "off_baseline": "residue-suspect",
+      "note": "c2 lane 的命中率串道，off 绝对值不作对外依据；decl 243.6 ms 是 decl 侧的落地常数"
+    },
+    {
+      "id": "bp45@2031",
+      "generator": "bp45",
+      "machine": "169",
+      "pool_blocks": 2031,
+      "pause_s": 28,
+      "live_sessions": 14,
+      "live_rounds": 12,
+      "arms": {
+        "off": {"mean": 843.7, "slow_sessions": "6/14", "hit_pct": 59.40, "evidence": "bp45.c7_off_20261118-093300"},
+        "decl": {"mean": 423.3, "slow_sessions": "0/14", "hit_pct": 72.15, "evidence": "bp45.c7_decl_20261118-094107"}
+      },
+      "delta_pct": -49.8,
+      "verdict": "profit-decl-only",
+      "off_baseline": "residue-suspect",
+      "note": "同 bp25@2031；注意 bp45（nocc）同 lane 两次 off 跑出 5944.0 与 364.7（6× 摆幅）⇒ off 绝对值本身不是可靠量"
+    },
+    {
+      "id": "gp69@2031",
+      "generator": "gp69",
+      "machine": "169",
+      "pool_blocks": 2031,
+      "pause_s": 28,
+      "live_sessions": 20,
+      "live_rounds": 12,
+      "churn": {"sessions": 4, "rounds": 22, "chars": 7000},
+      "arms": {
+        "off": {"mean": 9918.6, "slow_sessions": "20/20", "evidence": "gp69.c7_off_20261118-101718"},
+        "decl": {"mean": 1379.0, "slow_sessions": "2/20", "evidence": "gp69.c7_decl_20261118-102418"}
+      },
+      "delta_pct": -86.1,
+      "verdict": "profit-decl-only",
+      "off_baseline": "residue-suspect",
+      "note": "decl 侧尾部没清干净：20 格里 2 格仍有慢会话"
+    },
+    {
+      "id": "bpdl@2031",
+      "generator": "bpdl",
+      "machine": "169",
+      "pool_blocks": 2031,
+      "pause_s": 28,
+      "live_sessions": 24,
+      "live_rounds": 20,
+      "arms": {
+        "off": {"mean": 8625.6, "p50": 9090.7, "slow_sessions": "24/24", "hit_pct": 0.39, "evidence": "bpdl.A_off_20261118-110333"},
+        "decl": {"mean": 837.8, "slow_sessions": "0/24", "hit_pct": 84.81, "evidence": "bpdl.A_decl_20261118-111254"}
+      },
+      "delta_pct": -90.3,
+      "verdict": "discarded",
+      "off_baseline": "polluted",
+      "note": "off 命中 0.39% ⇒ 重污染，该格作废；decl 837.8 ms 可引用"
+    },
+    {
+      "id": "gc50@2031",
+      "generator": "gc50",
+      "machine": "169",
+      "pool_blocks": 2031,
+      "pause_s": 28,
+      "live_sessions": 14,
+      "churn": {"sessions": 5, "rounds": 30, "chars": 10500},
+      "arms": {
+        "off": {"mean": 20213.5, "p50": 27901.4, "evidence": "gc50.c2_off_20261118-104045"},
+        "decl": {"mean": [2682.3, 2872.4], "p50": [1897.9, 2217.0], "evidence": ["gc50.c2_decl_20261118-105211", "gc50.c2_decl_20261118-111229"]}
+      },
+      "delta_pct": -85.9,
+      "verdict": "capacity-bound",
+      "off_baseline": "residue-suspect",
+      "note": "off 的 20–28 s 平台主要成分是容量排队（240 live × 8–9k tok = 5–7× 池），不是缓存问题；超出特性作用域，只作趋势记录"
+    },
+    {
+      "id": "gc70@2031",
+      "generator": "gc70",
+      "machine": "169",
+      "pool_blocks": 2031,
+      "pause_s": 28,
+      "live_sessions": 20,
+      "arms": {
+        "off": {"mean": 20807.5, "p50": 27900.1, "evidence": "gc70.c7_off_20261118-104045"},
+        "decl": {"mean": [2193.7, 2303.3], "p50": [1637.0, 1573.0], "evidence": ["gc70.c7_decl_20261118-105211", "gc70.c7_decl_20261118-111229"]}
+      },
+      "delta_pct": -89.0,
+      "verdict": "capacity-bound",
+      "off_baseline": "residue-suspect",
+      "note": "同 gc50；两轮跑序结果稳定（1.5–2.1× 排空收益）"
+    },
+    {
+      "id": "real5_agent12@624",
+      "generator": null,
+      "machine": "3.2",
+      "pool_blocks": 624,
+      "arms": {
+        "off": {"mean": 265.4, "slow_sessions": "0/12", "hit_pct": 73.08, "delta_hits": 320384},
+        "decl": {"mean": [270.9, 269.6], "p50_delta_pct": 1.8, "slow_sessions": "0/12", "hit_pct": 83.51, "delta_hits": [366080, 373248]}
+      },
+      "verdict": "neutral",
+      "off_baseline": "clean",
+      "note": "『通道 vs 收益』的教科书反例：register 611、hit +10.4 pp、delta_hits +45,696 全部成立，但 p50 反升 1.8%。池对它是自足的"
+    }
+  ],
+  "ttl_axis": {
+    "machine": "169",
+    "pool_blocks": 570,
+    "arm": "decl",
+    "dataset_shape": "realshort3（6 live × 10 轮、pause 8 s、live 跨度 ~80–90 s；+10 churn × 36 轮）",
+    "dataset_note": "realshort3 由早期脚本生成、未随本包入库；ttl 结论只依赖其『8 s 停顿 + live 跨度 80–90 s』形状",
+    "cells": [
+      {"cc": "none", "ttl_s": null, "mean": 268.0, "live": 436.8, "churn": 253.9, "p90": 301.7, "hit_pct": 23.04, "delta_hits": 216832, "slow_sessions": "0/6", "verdict": "baseline"},
+      {"cc": "yes", "ttl_s": null, "mean": 272.8, "live": 425.0, "churn": 260.1, "p90": 310.8, "hit_pct": 23.04, "delta_hits": 216832, "slow_sessions": "0/6", "verdict": "ttl-omitted-ok"},
+      {"cc": "yes", "ttl_s": 120, "mean": 266.4, "live": 426.6, "churn": 253.1, "p90": 289.2, "hit_pct": 23.04, "delta_hits": 216832, "slow_sessions": "0/6", "verdict": "ttl-ok"},
+      {"cc": "yes", "ttl_s": 60, "mean": 284.7, "live": 514.2, "churn": 265.6, "p90": 304.9, "hit_pct": 20.21, "delta_hits": 190208, "slow_sessions": "1/6", "verdict": "ttl-too-short"},
+      {"cc": "yes", "ttl_s": 15, "mean": 286.3, "live": 513.3, "churn": 267.3, "p90": 307.9, "hit_pct": 20.22, "delta_hits": 190336, "slow_sessions": "1/6", "verdict": "ttl-too-short"},
+      {"cc": "yes", "ttl_s": 8, "mean": 275.9, "live": 498.6, "churn": 257.4, "p90": 291.8, "hit_pct": 20.25, "delta_hits": 190592, "slow_sessions": "1/6", "verdict": "ttl-too-short"},
+      {"cc": "yes", "ttl_s": 3, "mean": 273.2, "live": 511.1, "churn": 253.3, "p90": 279.1, "hit_pct": 20.18, "delta_hits": 189952, "slow_sessions": "1/6", "verdict": "ttl-too-short"}
+    ],
+    "conclusion": "delta_hits 只有两档：216,832（ttl 缺席 / 120 s）与 ≈190,000（ttl ≤ 60 s），差 12.4%。阈值落在 60–120 s 之间，而 pause 只有 8 s ⇒ 判据单位是『会话跨度 80–90 s』，不是停顿长度。机制：C 区到期不删块，而是 promote_to_zone_b 降级（session refs 保留），提前把保护退还回去",
+    "recommendation": "不写 ttl_s（只留 range），或写 ≥ 会话跨度；写小于会话跨度会稳定损失 ~12% 命中"
+  },
+  "life_axis": {
+    "machine": "169",
+    "pool_blocks": 2031,
+    "dataset": "bp70",
+    "compare": {"decl": 587.7, "life_r2": 618.0, "life_r3": 625.0},
+    "delta_pct": [5.2, 6.3],
+    "delta_hits": 0,
+    "verdict": "not-worth-it",
+    "note": "life 臂 delta_hits 恒为 0 是定义性的：它到点把保护释放掉，命中量等于 decl 臂。到点释放不回本 ⇒ 别为这个特性付出 keeper 的复杂度"
+  },
+  "mechanism": {
+    "one_field": "session.session_id",
+    "dead_fields": ["agent_status", "priority", "prediction", "session.parent_session_id", "priority_control"],
+    "zones": {
+      "A": "num_session_refs == 0，FIFO",
+      "B": "num_session_refs > 0，按引用数分 10 桶，桶内 FIFO",
+      "C": "ttl 未过期的 deadline 保护区，TTL 内不可分配"
+    },
+    "order": "popleft 恒从链表头取 ⇒ A → B(桶 0..9) → C",
+    "off_arm": "不发 header ⇒ 每个请求走 clear_block_session_refs 分支 ⇒ 全部块留在 A 区 ⇒ 退化成无归属全局 LRU",
+    "hard_evidence": {
+      "bp70_decl_cc": {"mean": 587.7, "hit_pct": 62.87, "delta_hits": 1875968},
+      "bp70_nocc_decl": {"mean": 610.2, "hit_pct": 62.87, "delta_hits": 1875968},
+      "identity_note": "两格的 hit_pct 与 delta_hits 逐位相同 ⇒ cache_control 字段在 0.69× 过订下增量约等于 0，收益全部由 session_id 的归属带来"
+    }
+  },
+  "known_gaps": [
+    "3.2 上 bp45 / bpdom 的 decl 格未跑（YG 指令停机），624 池的过订上限未知",
+    "169 上 bp70 / gp69 / bpdl 的 off 基线受钉住残留污染，降幅需干净引擎复测才能对外",
+    "ttl 阈值只落在 (60, 120) 区间，未细分；判据已定为会话跨度但缺 90 s 一档",
+    "life 臂只在 bp70 @2031 跑过，没在其他形状上验证"
+  ]
+}

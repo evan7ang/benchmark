@@ -28,16 +28,42 @@ resume」场景下能不能把 TTFT p50 拉下来：pause 期间保护会话前�
 
 ---
 
+## 收益边界（2026-11-18 实测，两台机器）
+
+上面两条结论只覆盖**池子装得下**的形状。池子**过订**时结论相反，且这个方向已经定量：
+详见 [`docs/RESULTS_2026-11-18_profit_map.md`](docs/RESULTS_2026-11-18_profit_map.md)，机读版
+[`config/profit_scenarios.json`](config/profit_scenarios.json)。
+
+**成立条件（三条同时）**：① `live_tok / pool_tok ≥ ≈0.8`；② 停顿在秒级（8–28 s）；
+③ 池余量 < 1.3× 受保护集（"比受保护集大 30 %"仍会掉悬崖）。
+
+| 机器 / 池 | 数据集 | off | decl | 全局 mean Δ | p90 Δ |
+|---|---|---:|---:|---:|---:|
+| 169 / **2031** | `bpdom`（24 live × 20 轮） | 2504.1 | **838.9** | **−66.5 %** | −91.4 % |
+| 3.2 / **624** | `bp25`（8 live × 12 轮，0.81× 池） | 1203.0 | **322.5** | **−73.2 %** | −93.8 % |
+
+两条硬结论：
+
+- **收益来自 `session.session_id`，不是 `cache_control`。** 同池同形状的孪生对（`bp70` 有 cc / `bp70_nocc` 无 cc）
+  在 decl 臂上 `hit %` 与 `Δhits` **逐位相同**（62.87 % / 1,875,968）⇒ 0.69× 过订下 `cache_control` 字段增量 ≈ 0。
+- **`ttl_s` 默认不要写。** 写小于**会话跨度**稳定损失 ~12 % 命中（216,832 → ≈190,000）；判据是会话跨度
+  （实测 80–90 s），不是 pause（8 s）。机制是 C 区到期 `promote_to_zone_b` **降级**而非保留。
+
+反例必须一起看：`gp45 @2031`（0.45× 池）⇒ **+3.9 %**；`real5_agent12 @624`（池自足）⇒ p50 **+1.8 %**。
+
+
+---
+
 ## 目录
 
 ```
 cache_control/
 ├── env/                  唯一环境契约（env.example.sh + 各机 profiles/）
-├── config/               scenario.json（场景参数/矩阵）+ motor/{decl,off,life}.json
-├── data/                 冻结源 + 离线生成器（产物 generated/ 不入 git）
+├── config/               scenario.json（场景参数/矩阵）+ profit_scenarios.json（收益地图）+ motor/{decl,off,life}.json
+├── data/                 冻结源 + 离线生成器（gen_sp7 / gen_profit，产物 generated/ 不入 git）
 ├── driver/               replay_driver.py（vendored，路径/端口/容器参数化）
 ├── scripts/              00 preflight … 07 verify
-├── docs/                 DESIGN / RUNBOOK / EXPECTED_RESULTS / TROUBLESHOOTING
+├── docs/                 DESIGN / RUNBOOK / EXPECTED_RESULTS / RESULTS_2026-11-18_profit_map / TROUBLESHOOTING
 └── results/              证据与日志（不入 git）
 ```
 
@@ -134,6 +160,13 @@ churn 数据集 = agent 行（与无 churn 版**逐字节相同**）+ 一次性�
 > `allP50/allMean` 是全体请求（含 churn），churn 占 ~90% 且两臂行为相近，会稀释效应——
 > 实测同一轮：**agent −82.2%（1186→212），全体仅 −4.7%（356→339）**。
 > 对外只报 agent 组；需要提全体时必须注明「含背景流量，不可用作结论」。
+>
+> **2026-11-18 修订（过订形状下）**：上一条的前提是「两臂 churn 行为相近」。**过订时这个前提不成立**——
+> churn 请求排在同一条 KV 队列上，off 臂对它的惩罚是真实的（`bpdom` 的 churn 切片也翻倍）。此时排除 churn
+> 会系统性高估：`gp25` agent −68.7 % vs 全体 **−49.5 %**（多报 19 pp）；`3.2 bp25` −86.2 % vs **−73.2 %**（多报 13 pp）。
+> ⇒ **收益定量一律以 `allMean` 为主判据**，`agMean/agP50` 降为诊断（收益是否落在 live 侧）。
+> 详见 [`docs/RESULTS_2026-11-18_profit_map.md`](docs/RESULTS_2026-11-18_profit_map.md) §12。
+
 
 `make analyze` 的输出里：
 
