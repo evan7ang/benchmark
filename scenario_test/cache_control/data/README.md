@@ -86,3 +86,49 @@ L1: rows=429 agent_infer=64 churn=301 agent==S8=True churn_cc=0
 L2: rows=729 agent_infer=64 churn=601 agent==S8=True churn_cc=0
 L3: rows=986 agent_infer=64 churn=858 agent==S8=True churn_cc=0
 ```
+
+---
+
+## 过订比扫描数据集（bp / gp / gc，2026-11-18 新增）
+
+生成：`make data-profit`（= `python3 data/gen_profit.py --ttl 60 --strip-cc`）
+
+这一族**纯合成**（不依赖 capture、可离线逐字节复现），把两个真正的自变量做成旋钮：
+
+| 旋钮 | 语义 | 影响 |
+|---|---|---|
+| `live_n` × `live_chars` | live 会话数与各自独立前缀长度 | **过订比** `live_tok / pool_tok` |
+| `churn_n` × `churn_chars` | 外部冷流量会话与每次前缀长度 | 淘汰压力强度 |
+
+| 数据集 | rows | infer | live 会话 × 轮 | live 前缀 | churn | 设计用途 |
+|---|--:|--:|---|---:|---|---|
+| `bigp_live8/12/20` | 912/1008/1200 | 816/864/960 | 8/12/20 × 12 | 24,000 字符 | 12×60 | 会话数阶梯（前缀恒定） |
+| `bp25` / `bp45` / `bp70` | 912/1056/1200 | 816/888/960 | 8/14/20 × 12 | 8k/8k/9k | 12×60 | 过订比 0.25 / 0.45 / 0.69 |
+| `bpdom` / `bpdl` | 1140 / 1020 | 660 / 540 | 24 × 20 | 8,000 字符 | 6×30 / 6×10 | 长会话跨度 + 轻/极轻 churn |
+| `gp25` / `gp45` / `gp69` | 280/424/568 | 184/256/328 | 8/14/20 × 12 | 8k/8k/9k | 4×22 | 重 churn、少轮次 |
+| `gc50` / `gc70` | 486 / 630 | 318 / 390 | 14 / 20 × 12 | 8k/9k | 5×30（10.5k 字符） | 极端 churn（容量受限） |
+
+**形状契约**：
+
+- live 会话：12（或 20）次 `infer`，间隔 **`HOT=28000 ms` ⇒ pause ≈ 28 s**，每次 infer 后 8 s 一个 `event` 行；
+- churn 行：`kind=infer`、`session_id=churn*`、**不发 `cache_control`**（decl 臂也一样），前缀按 (会话, 轮次) 唯一 ⇒ 永不命中；
+- `cache_control` 键序 `{type, ttl_s, range}`（与实测落盘件一致，保证逐字节复现）；
+- `--ttl 0` 生成**只带 range、不写 `ttl_s`** 的版本 —— 实测与「完全不发 `cache_control`」在命中上逐位相同，
+  且不会因 ttl < 会话跨度而提前降级 ⇒ **生产默认建议 `--ttl 0`**；
+- `--strip-cc` 生成 `<name>_nocc.jsonl` 孪生：只摘 `agent_hint.cache_control`，其余逐行相同（用于
+  「收益是 session_id 给的、还是 cc 字段给的」这一问）。
+
+已核对 sha256（`--ttl 60`，与 2026-11-18 实测件**逐字节相同**）：
+
+| 文件 | sha256 |
+|---|---|
+| `bp70.jsonl` | `c493b128351b903789174a52f8999961288feffacd36b180725c9ff3f0d9486e` |
+| `bp25.jsonl` | `2e33706aea2d8e2dfc7852961c24063f0ae4ee671c79206c6a5398b3d51d102c` |
+| `bpdom.jsonl` | `456c99ad7a53894c1510ac551cda114019be5fc65d419ab9ec683f511945981c` |
+| `bigp_live12.jsonl` | `fbcb3111bd44347a80117029b2d70e5e0840283ac400e7c58170eef87ac3c6f0` |
+| `gc50.jsonl` | `1d0fe6b9cb9156cd6c5334607c4631a22e98e91cadba0c25a4eb4e099f0df140` |
+
+> 注意：这一族**不替代** sp7 族。sp7 回答「池子装得下时 hint 是加速还是开销」（结论：纯开销 +15~40 ms），
+> bp/gp/gc 回答「池子过订时 hint 能兑现多少」。两者的分界在 `live_tok / pool ≥ ≈0.8`。
+> 实测收益地图见 `docs/RESULTS_2026-11-18_profit_map.md`。
+

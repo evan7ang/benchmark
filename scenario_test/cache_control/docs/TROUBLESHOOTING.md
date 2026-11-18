@@ -166,3 +166,71 @@ curl -s -X POST -H 'Content-Type: application/json' \
 ```
 
 `00_preflight.sh` 现在会同时校验：resume 白名单、`/internal/agent-status` 路由、grpcio 版本。
+
+---
+
+## 19. ★ `cache_control.ttl_s` 写小了 / 写成旧键 `ttl` ⇒ 保护被提前退还（静默掉 12 % 命中）
+
+**症状**：数据集看起来"带 cache_control"，但两臂命中率完全相同（`Δhits` 逐位相同），或者 decl 的命中率
+比预期低一档；引擎日志里 `cache_control retention elapsed; released session pin` **一条都没有**（说明不是
+pin 释放路径）。典型误判是「cc 字段是空实现」。
+
+**原因**（两个独立的坑）：
+
+1. **旧键 `ttl` 被忽略**：`agent_hint.cache_control` 走 spec 字段名 `ttl_s`。写 `{"ttl": 8}` 等于没写 ttl，
+   但外加的 `ttl_s: 60` 还在生效 —— 早期 `realshort3_ttl8/15/3b` 三组"实验"其实是同一个配置，
+   全部无效。
+2. **`ttl_s` 的单位是会话跨度，不是 pause**：C 区到期不是"删块"，而是 `promote_to_zone_b` **降级**
+   （`_on_ttl_expired` 明确保留 session refs）。写小于会话跨度 = 提前把保护退还，命中率掉一档。
+   实测（169、池 570、decl 臂、同引擎纪元、形状 pause 8 s / 会话跨度 80–90 s）：
+
+   | `ttl_s` | Δhits | hit % |
+   |---|---:|---:|
+   | 不写 / 120 | **216,832** | 23.04 |
+   | 60 / 15 / 8 / 3 | **≈190,000** | 20.2 |
+
+   阈值落在 **60–120 s** 之间，而 pause 只有 8 s ⇒ 判据单位是**会话跨度**。
+
+**正确做法**：
+- 生产与实验**默认不写 `ttl_s`**（只留 `{"type":"ephemeral","range":{"end":4,"unit":"message"}}`）；
+- 确实要写就写 **≥ 一个会话的持续时长**（下界 = 会话跨度，不是 pause）；
+- 生成数据集时用 `python3 data/gen_profit.py --ttl 0`；
+- 自检：两臂 `Δhits` 若**逐位相同**，先怀疑 ttl 写小了或键名写错，而不是"cc 没用"。
+
+> 顺带一条：同池同形状的 `bp70`（有 cc）与 `bp70_nocc`（无 cc）在 decl 臂上 `hit %` 与 `Δhits`
+> **逐位相同**（62.87 % / 1,875,968）—— 0.69× 过订下收益全部由 `session.session_id` 的归属带来，
+> `cache_control` 增量 ≈ 0。别把这条当成"cc 坏了"，它是"cc 只在会话引用本身扛不住时才有效"。
+
+---
+
+## 20. off 臂的绝对值不能跨 lane / 跨时序引用（6× 摆幅）
+
+**症状**：同数据集同 lane 两次跑 off，得到 5944.0 与 364.7（`bp45_nocc`）；或 `bp70` 两次 8401.1 / 9768.7。
+把其中一次当基线算出来的"加速比"可以任意漂亮。
+
+**原因**：off 臂不发 header ⇒ 每个请求都走 `clear_block_session_refs` 分支 ⇒ 块无会话归属；前序 decl 轮
+留下的受保护块/钉住状态仍在（`reset_prefix_cache` 清不掉，见 14 号坑），off 的命中率因此从 0.4 % 到
+60 % 之间乱跳。
+
+**正确做法**：
+- 配对必须**同引擎相邻**且 **off 先跑**；
+- 判基线洁净度看 off 格自身 `hit %`：`< 1 %`（如 `bpdom` 0.35、`bpdl` 0.39、`bp70` 0.58）说明 off 被迫每次全量重算，
+  降幅不可引用，只能引 decl 绝对值；`15–31 %` 属可用基线；
+- 跨 lane（c2/c7）的命中率会串道，`Δhits` 一律不可引用。
+
+---
+
+## 21. 收益定量用哪个 mean：过订形状下不能用 `agMean`
+
+**症状**：同一格数据，报 `agMean` 得 −86.2 %，报 `allMean` 得 −73.2 %，差 13 pp；不同人算出不同结论。
+
+**原因**：`agMean` 只算 live（agent）会话，把 churn 请求排除在外。`churn` 占 ~90 % 且**在池自足时**两臂行为
+相近，所以老的"只看 agent 组"规则在 `sp7` 形状下没出问题。**过订时前提破了**：churn 排在同一条 KV 队列上，
+off 臂对它的惩罚是真实的（`bpdom` 的 churn 切片也翻倍），排除它等于系统性高估。
+
+**正确做法**：
+- **收益定量主判据 = `allMean`**（全部 `kind=infer`，live 与 churn 等权）；
+- `agMean` / `agP50` 降为诊断（回答"收益是否落在 live 侧"）；`le500` / `cold50` / `res50` 保留原义；
+- 双口径规则：mean 与 p50 同时改善才算"双指标受益"；
+- 详见 `docs/RESULTS_2026-11-18_profit_map.md` §1 与 §12。
+
