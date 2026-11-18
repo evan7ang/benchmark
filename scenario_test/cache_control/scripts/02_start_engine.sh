@@ -11,10 +11,22 @@ guard_container "$ENGINE_CONTAINER"
 require_container "$ENGINE_CONTAINER"
 LOG="$LOG_DIR/engine-$ENGINE_PORT.log"
 POOLENV="$LOG_DIR/pool.env"
+# 引擎日志必须在容器可写的路径。results/logs 未挂载时退到容器内 /tmp，
+# 主机侧通过 docker exec 读取（见 read_banner / 末尾 banner 输出）。
+if docker inspect -f '{{range .Mounts}}{{.Destination}} {{end}}' "$ENGINE_CONTAINER" 2>/dev/null | grep -qF "$SCENARIO_ROOT"; then
+  CONT_LOG="$LOG"
+else
+  CONT_LOG="/tmp/engine-$ENGINE_PORT.log"
+  warn "results/logs 未挂载进容器，引擎日志写在容器内 $CONT_LOG"
+fi
 
 read_banner() { # -> "tokens blocks"
   local line tok blk
   line=$(grep -a 'GPU KV cache size' "$LOG" 2>/dev/null | tail -1 || true)
+  if [ -z "$line" ]; then
+    # 日志目录未挂进容器时，引擎把日志写在容器内 /tmp
+    line=$(docker exec "$ENGINE_CONTAINER" sh -c "grep -a 'GPU KV cache size' '$CONT_LOG' 2>/dev/null | tail -1" 2>/dev/null | tr -d '\r' || true)
+  fi
   if [ -n "$line" ]; then
     tok=$(echo "$line" | sed -n 's/.*size: *\([0-9,]*\) *tokens.*/\1/p' | tr -d ',')
     if [ -n "$tok" ]; then
@@ -48,8 +60,11 @@ if [ "$FORCE" -eq 0 ] && [ "$(http "http://127.0.0.1:$ENGINE_PORT/health")" = "2
   fi
 else
   say "重启引擎进程（容器 $ENGINE_CONTAINER, NPU=$NPU_INDEX, port=$ENGINE_PORT）"
-  docker exec "$ENGINE_CONTAINER" sh -c "pkill -f 'vllm serve' 2>/dev/null || true" >/dev/null 2>&1 || true
-  sleep 3
+  # 必须 SIGKILL 所有 VLLM 进程：vLLM v1 会把 EngineCore 改名成 `VLLM::EngineCore`，
+  # 只 pkill 'vllm serve' 会留下它继续持有 KV 池（导致「重启」实际未重启、计数器不清零）。
+  docker exec "$ENGINE_CONTAINER" sh -c "pkill -9 -f '[V]LLM' 2>/dev/null || true; pkill -9 -f '[Q]wen3-8B' 2>/dev/null || true" >/dev/null 2>&1 || true
+  wait_engine_hbm_released 60 || warn "HBM 未在 60s 内释放，引擎可能起不来（见 TROUBLESHOOTING）"
+  sleep 2
   : > "$LOG"
   OVERRIDE_ARG=""
   [ -n "${POOL_BLOCKS_OVERRIDE:-}" ] && OVERRIDE_ARG="--num-gpu-blocks-override ${POOL_BLOCKS_OVERRIDE}"
@@ -62,7 +77,7 @@ else
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3600 VLLM_RINGBUFFER_WARNING_INTERVAL=600
     export MASTER_PORT=$MASTER_PORT
     cd /vllm-workspace/vllm 2>/dev/null || true
-    exec > $LOG 2>&1
+    exec > $CONT_LOG 2>&1
     vllm serve $MODEL_PATH --served-model-name $SERVED_MODEL_NAME --port $ENGINE_PORT \
       --tensor-parallel-size 1 --max-model-len 32768 --gpu-memory-utilization 0.9 \
       --enforce-eager --enable-prefix-caching --enable-auto-tool-choice --tool-call-parser hermes \
@@ -74,6 +89,24 @@ else
   read -r TOK BLK <<<"$(read_banner)"
   [ -n "${TOK:-}" ] || die "日志中没有 'GPU KV cache size'，见 $LOG"
   say "banner: ${TOK} tokens = ${BLK} blocks"
+
+  # dev-mode 的 /reset_prefix_cache 路由：直接探测（不同构建的日志格式不一致）
+  RC=$(curl -s -X POST -o /dev/null -w '%{http_code}' --max-time 5 \
+       "http://127.0.0.1:${ENGINE_PORT}/reset_prefix_cache" 2>/dev/null || true)
+  if [ "$RC" = "200" ]; then
+    say "reset_prefix_cache 可用（200）"
+  else
+    warn "reset_prefix_cache 探测返回 $RC：VLLM_SERVER_DEV_MODE 可能未生效，--reset-prefix-cache 会失败"
+  fi
+fi
+
+# 新进程校验：引擎自身计数应接近 0（旧 EngineCore 残留时会看到百万级）
+Q=$(curl -s --max-time 5 "http://127.0.0.1:${ENGINE_PORT}/metrics" 2>/dev/null \
+    | grep -a 'prefix_cache_queries_total{' | grep -oE '[0-9.]+$' | head -1 || true)
+if [ -n "${Q:-}" ] && python3 -c "import sys; sys.exit(0 if float('${Q}') < 100000 else 1)" 2>/dev/null; then
+  say "引擎计数器新鲜：queries=${Q}（确认是全新进程）"
+else
+  warn "引擎计数器 queries=${Q:-NA} 偏大：旧 EngineCore 可能未死透（见 TROUBLESHOOTING 第 12 条）"
 fi
 
 if [ -n "${POOL_BLOCKS_OVERRIDE:-}" ] && [ -n "${BLK:-}" ]; then

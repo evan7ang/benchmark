@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
 """06 复算指标（只读 evidence，不打流）。
 
-口径（与主文档 §12 一致）：
-  p50        sorted(ttft_ms)[round(0.5*(n-1))]，n = infer 请求数（nearest-rank）
-  mean       全体 infer 的算术平均
-  le400/500  ttft <= 阈值 的请求数
-  cold p50   call_index == 1 的子集
-  resume p50 call_index >= 2 的子集
+口径（与主文档一致；churn 形态见 §分组）：
+  p50        agent 组的 sorted(ttft_ms)[round(0.5*(n-1))]（nearest-rank）
+  mean       agent 组算术平均
+  le400/500  agent 组 ttft <= 阈值 的请求数
+  cold p50   agent 组 call_index == 1 的子集
+  resume p50 agent 组 call_index >= 2 的子集
+  churn p50  churn-* 会话组（压力源健康度，不参与收益判断）
   Δhits      vllm.prefix_cache_hits_total 前后差（原始差，含 warmup）
   Δqueries   vllm.prefix_cache_queries_total 前后差
   Δprefill   vllm.request_prefill_kv_computed_tokens_sum 前后差
-  恒等式     Δhits + Δprefill == Δqueries（精确相等）
+  恒等式     Δhits + Δprefill == Δqueries；
+             churn 形态允许 |差| <= identity_tolerance_bp（0.25%）× Δqueries（采样边界竞态）
   hit/pt     Δhits / Σ prompt_tokens（跨机可比，可 >100%）
   cached%    Δhits / Δqueries（只可同机比）
-  复用块     (Δhits - 16640) / 128
-  省算       1 - Δprefill / 同规模 off 基线（S1 253022 / S4 265289 / S8 545292 / S32 2150457）
+  复用块     churn 形态：Δhits / 128（warmup 块可能已被 churn 挤掉）
+             非 churn：  (Δhits - 16640) / 128
+  省算       1 - Δprefill / 同数据集 off 轮的 Δprefill 中位数（无则退回内置常量，标注来源）
+  压力       churn 形态：(Σ churn prompt_tokens / 128) / span_s  块/秒
 """
 import argparse
 import glob
@@ -24,6 +28,7 @@ import statistics
 import sys
 
 WARMUP_HITS = 16640
+# 兼容旧证据的内置基线（仅非 churn、未知基线时兜底；输出会标注 base=builtin）
 OFF_BASELINE = {1: 253022, 4: 265289, 8: 545292, 32: 2150457}
 
 
@@ -40,7 +45,11 @@ def med(xs):
     return xs[round(0.5 * (len(xs) - 1))] if xs else None
 
 
-def analyze(run_dir):
+def is_churn(sid, prefix):
+    return str(sid or "").startswith(prefix)
+
+
+def analyze(run_dir, churn_prefix="churn-", tol_bp=25):
     meta = rd(os.path.join(run_dir, "meta.json"))
     if not meta:
         return None
@@ -51,11 +60,19 @@ def analyze(run_dir):
             line = line.strip()
             if line:
                 rows.append(json.loads(line))
-    infer = [r for r in rows if r.get("kind") == "infer" or r.get("ttft_ms") is not None]
-    ttft = [r["ttft_ms"] for r in infer if r.get("ttft_ms") is not None]
-    cold = [r["ttft_ms"] for r in infer if r.get("call_index") == 1 and r.get("ttft_ms") is not None]
-    res = [r["ttft_ms"] for r in infer if (r.get("call_index") or 0) >= 2 and r.get("ttft_ms") is not None]
-    sp = sum(r.get("prompt_tokens") or 0 for r in infer)
+    infer = [r for r in rows if r.get("ttft_ms") is not None]
+    agent = [r for r in infer if not is_churn(r.get("session_id"), churn_prefix)]
+    churn = [r for r in infer if is_churn(r.get("session_id"), churn_prefix)]
+
+    def ttfts(rs):
+        return [r["ttft_ms"] for r in rs if r.get("ttft_ms") is not None]
+
+    ag = ttfts(agent)
+    ch = ttfts(churn)
+    cold = ttfts([r for r in agent if r.get("call_index") == 1])
+    res = ttfts([r for r in agent if (r.get("call_index") or 0) >= 2])
+    sp_agent = sum(r.get("prompt_tokens") or 0 for r in agent)
+    sp_churn = sum(r.get("prompt_tokens") or 0 for r in churn)
 
     ma = (rd(os.path.join(run_dir, "metrics_after.json")) or {}).get("vllm") or {}
     mb = (rd(os.path.join(run_dir, "metrics_before.json")) or {}).get("vllm") or {}
@@ -66,29 +83,55 @@ def analyze(run_dir):
           - mb.get("request_prefill_kv_computed_tokens_sum", 0)) if have else None
 
     rm = rd(os.path.join(run_dir, "_run_meta.json")) or {}
-    sessions = meta.get("sessions")
-    if sessions is None:
-        sessions = len({r.get("session_id") for r in infer if r.get("session_id")})
+    # 会话数只统计 agent 组（meta.sessions 会把 churn 会话也算进去）
+    sessions = len({r.get("session_id") for r in agent})
+    has_churn = len(churn) > 0
 
-    base = OFF_BASELINE.get(sessions)
+    # 压力：churn 组 token 总量 / 覆盖时长
+    pressure = None
+    ch_ts = [r.get("actual_ts_ms") for r in churn if r.get("actual_ts_ms")]
+    if has_churn and ch_ts and sp_churn:
+        span_s = max(0.001, (max(ch_ts) - min(ch_ts)) / 1000.0)
+        pressure = (sp_churn / 128.0) / span_s
+
+    if have:
+        if has_churn:
+            tol = max(128.0, (tol_bp / 10000.0) * abs(dq or 0))
+            identity_delta = (dh + dp) - dq
+            identity_ok = abs(identity_delta) <= tol
+            reuse = dh / 128.0
+        else:
+            identity_ok = (dh + dp == dq)
+            identity_delta = (dh + dp) - dq
+            reuse = (dh - WARMUP_HITS) / 128.0
+    else:
+        identity_ok = None
+        identity_delta = None
+        reuse = None
+
+    ds_name = os.path.basename(str(meta.get("dataset") or "")).replace(".jsonl", "")
     return {
         "run": os.path.basename(run_dir),
         "arm": meta.get("arm"),
+        "form": rm.get("form"),
         "lane": meta.get("lane"),
+        "dataset": ds_name,
         "sessions": sessions,
-        "n": len(ttft),
-        "p50": med(ttft),
-        "mean": statistics.mean(ttft) if ttft else None,
-        "le400": sum(1 for t in ttft if t <= 400),
-        "le500": sum(1 for t in ttft if t <= 500),
-        "cold_p50": med(cold),
-        "resume_p50": med(res),
+        "has_churn": has_churn,
+        "n": len(ag), "churn_n": len(ch),
+        "p50": med(ag), "mean": statistics.mean(ag) if ag else None,
+        "le400": sum(1 for t in ag if t <= 400),
+        "le500": sum(1 for t in ag if t <= 500),
+        "cold_p50": med(cold), "resume_p50": med(res),
+        "churn_p50": med(ch),
         "dH": dh, "dQ": dq, "dP": dp,
-        "identity_ok": (None if not have else (dh + dp == dq)),
-        "hit_pt": (100.0 * dh / sp) if (have and sp) else None,
+        "identity_ok": identity_ok, "identity_delta": identity_delta,
+        "hit_pt": (100.0 * dh / sp_agent) if (have and sp_agent) else None,
         "cached_pct": (100.0 * dh / dq) if (have and dq) else None,
-        "reuse_blocks": ((dh - WARMUP_HITS) / 128) if have else None,
-        "saved_pct": (100.0 * (1 - dp / base)) if (have and base) else None,
+        "reuse_blocks": reuse,
+        "saved_pct": None,          # 由 main 依据同数据集 off 轮填充
+        "baseline": None,
+        "pressure_blocks_s": pressure,
         "errs": meta.get("http_errors"),
         "selfcheck": meta.get("arm_selfcheck_ok"),
         "hint_sent": meta.get("hint_sent"),
@@ -114,6 +157,8 @@ def main(argv=None):
     ap.add_argument("--root", default=None, help="evidence 根目录")
     ap.add_argument("--glob", default="*", help="在根目录下的匹配（默认 *）")
     ap.add_argument("--sort", default="name", choices=["name", "p50", "arm"])
+    ap.add_argument("--churn-prefix", default="churn-")
+    ap.add_argument("--tol-bp", type=int, default=25, help="churn 恒等式容差（万分之，默认 0.25%）")
     ap.add_argument("--json", default=None, help="把结果写成 json 文件")
     args = ap.parse_args(argv)
 
@@ -123,19 +168,24 @@ def main(argv=None):
     if not dirs:
         dirs = sorted(d for d in glob.glob(os.path.join(root, args.glob))
                       if os.path.isfile(os.path.join(d, "meta.json")))
-    out = [x for x in (analyze(d) for d in dirs) if x]
+    out = [x for x in (analyze(d, args.churn_prefix, args.tol_bp) for d in dirs) if x]
 
-    # 省算基线：优先用内置常量；未知规模时，用同 root 下同会话数的 off 轮 Δprefill 中位数
+    # 省算基线：优先同数据集 off 轮的 Δprefill 中位数；否则退回内置常量
     off_dp = {}
     for x in out:
         if x["arm"] == "off" and x["dP"]:
-            off_dp.setdefault(x["sessions"], []).append(x["dP"])
+            off_dp.setdefault(x["dataset"], []).append(x["dP"])
     for x in out:
-        if x["saved_pct"] is None and x["dP"] and x["sessions"] in off_dp:
-            base = statistics.median(off_dp[x["sessions"]])
-            if base:
-                x["saved_pct"] = 100.0 * (1 - x["dP"] / base)
-                x["baseline_derived"] = True
+        if not (x["dP"] and x["arm"] in ("decl", "life")):
+            continue
+        base, src = None, None
+        if off_dp.get(x["dataset"]):
+            base, src = statistics.median(off_dp[x["dataset"]]), "off_rounds"
+        elif not x["has_churn"]:
+            base, src = OFF_BASELINE.get(x["sessions"]), "builtin"
+        if base:
+            x["saved_pct"] = 100.0 * (1 - x["dP"] / base)
+            x["baseline"] = src
 
     if args.sort == "p50":
         out.sort(key=lambda x: (x["p50"] is None, x["p50"]))
@@ -144,23 +194,27 @@ def main(argv=None):
     else:
         out.sort(key=lambda x: x["run"])
 
-    hdr = ("run", "arm", "lane", "S", "n", "p50", "mean", "le400", "le500",
-           "cold50", "res50", "dHits", "dPrefill", "ident", "hit/pt", "cached", "reuse", "saved", "errs", "sc", "base")
-    widths = (44, 5, 4, 3, 4, 8, 8, 5, 5, 8, 8, 9, 10, 6, 7, 7, 7, 7, 4, 4, 5)
+    hdr = ("run", "form", "arm", "lane", "S", "agN", "chN", "agP50", "agMean", "le500",
+           "cold50", "res50", "churn50", "dHits", "dPrefill", "ident", "hit/pt", "cached",
+           "reuse", "saved", "press", "errs", "sc", "base")
+    widths = (52, 6, 5, 4, 3, 4, 4, 8, 8, 5, 8, 8, 8, 9, 10, 11, 7, 7, 7, 7, 6, 4, 3, 9)
     line = "".join(h.ljust(w) for h, w in zip(hdr, widths))
     print(line)
     print("-" * len(line))
     for x in out:
-        vals = [x["run"], fmt(x["arm"]), fmt(x["lane"]), fmt(x["sessions"]), fmt(x["n"]),
-                fmt(x["p50"]), fmt(x["mean"]), fmt(x["le400"]), fmt(x["le500"]),
-                fmt(x["cold_p50"]), fmt(x["resume_p50"]), fmt(x["dH"], 0), fmt(x["dP"], 0),
-                "OK" if x["identity_ok"] else ("--" if x["identity_ok"] is None else "FAIL"),
+        ident = "--" if x["identity_ok"] is None else ("OK" if x["identity_ok"] else "FAIL")
+        if x["identity_delta"] not in (None, 0):
+            ident = "%s(%+d)" % (ident, x["identity_delta"])
+        vals = [x["run"], fmt(x["form"]), fmt(x["arm"]), fmt(x["lane"]), fmt(x["sessions"]),
+                fmt(x["n"]), fmt(x["churn_n"]), fmt(x["p50"]), fmt(x["mean"]), fmt(x["le500"]),
+                fmt(x["cold_p50"]), fmt(x["resume_p50"]), fmt(x["churn_p50"]),
+                fmt(x["dH"], 0), fmt(x["dP"], 0), ident,
                 fmt(x["hit_pt"]) + ("%" if x["hit_pt"] is not None else ""),
                 fmt(x["cached_pct"]) + ("%" if x["cached_pct"] is not None else ""),
                 fmt(x["reuse_blocks"], 0),
                 fmt(x["saved_pct"]) + ("%" if x["saved_pct"] is not None else ""),
-                fmt(x["errs"]), "T" if x["selfcheck"] else "F",
-                ("-" if x["hint_before"] is None else ("Y" if not x["hint_before"] else "N"))]
+                fmt(x["pressure_blocks_s"], 1), fmt(x["errs"]),
+                "T" if x["selfcheck"] else "F", fmt(x["baseline"])]
         print("".join(str(v).ljust(w) for v, w in zip(vals, widths)))
 
     if args.json:

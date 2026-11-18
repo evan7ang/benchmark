@@ -32,6 +32,7 @@ RUN_CFG="$LOG_DIR/cfg-$ARM-$STAMP.json"
 OUT="$LOG_DIR/motor-$ARM-lc$ENVLC-$STAMP.log"
 cp "$SRC_CFG" "$RUN_CFG"
 
+
 # 把模型路径 / 端口 / SHM 名注入本轮配置副本（保持原配置不动，便于审计）
 python3 - "$RUN_CFG" "$MODEL_PATH" "$KVC_METRICS_SHM_NAME" \
   "$INFER_PORT" "$MGMT_PORT" "$OBS_PORT" "${WORKER_PORT:-19478}" <<'PY'
@@ -52,6 +53,23 @@ c.setdefault("kvc_lifecycle_config", {})["metrics_shm_name"] = shm
 json.dump(d, open(p, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
 PY
 
+# 容器是否能看到 LOG_DIR？看不到时把配置 stage 进容器 /tmp，日志也写容器 /tmp，
+# 结束后再 docker cp 回来（保证包可移植，不依赖容器挂载布局）。
+LOG_DIR_VISIBLE=1
+docker inspect -f '{{range .Mounts}}{{.Destination}} {{end}}' "$MOTOR_CONTAINER" 2>/dev/null \
+  | grep -qF "$SCENARIO_ROOT" || LOG_DIR_VISIBLE=0
+if [ "$LOG_DIR_VISIBLE" = "0" ]; then
+  CONT_CFG="/tmp/cfg-$ARM-$STAMP.json"
+  CONT_OUT="/tmp/motor-$ARM-lc$ENVLC-$STAMP.log"
+  docker cp "$RUN_CFG" "$MOTOR_CONTAINER:$CONT_CFG" >/dev/null 2>&1 \
+    || die "无法把配置复制进容器 $MOTOR_CONTAINER"
+  OUT_REAL="$CONT_OUT"
+  say "LOG_DIR 未挂载进 motor 容器：配置/日志使用容器内 /tmp（结束会拷回）"
+else
+  CONT_CFG="$RUN_CFG"
+  OUT_REAL="$OUT"
+fi
+
 # 停掉旧 coordinator
 PID=$(docker exec "$MOTOR_CONTAINER" sh -c 'pgrep -f motor.coordinator.main | head -1' 2>/dev/null || true)
 if [ -n "$PID" ]; then
@@ -68,20 +86,23 @@ docker exec -d \
   -e MOTOR_SESSION_AFFINITY_ROUTE=0 \
   -e MOTOR_SESSION_AFFINITY_SHARED=1 \
   -e MOTOR_SESSION_AFFINITY_SHM_KEY="$SESSION_SHM_KEY" \
-  -e USER_CONFIG_PATH="$RUN_CFG" \
+  -e USER_CONFIG_PATH="$CONT_CFG" \
   -e MOTOR_CACHE_CONTROL_MAX=65536 \
   -e MOTOR_CACHE_CONTROL_TTL_MAX_S=3600 \
   -e MOTOR_CACHE_CONTROL_SWEEP_INTERVAL_S=2 \
   -e MOTOR_CACHE_CONTROL_LIFECYCLE="$ENVLC" \
-  "$MOTOR_CONTAINER" sh -c "cd /workspace && exec python3 -m motor.coordinator.main > $OUT 2>&1"
+  "$MOTOR_CONTAINER" sh -c "cd /workspace && exec python3 -m motor.coordinator.main > $OUT_REAL 2>&1"
 
 say "等待 liveness（:${MGMT_PORT}/liveness）..."
 for _ in $(seq 1 40); do
   if curl -s --max-time 2 "http://127.0.0.1:${MGMT_PORT}/liveness" 2>/dev/null | grep -q ok; then break; fi
   sleep 2
 done
-curl -s --max-time 2 "http://127.0.0.1:${MGMT_PORT}/liveness" 2>/dev/null | grep -q ok \
-  || die "coordinator 未就绪，见 $OUT"
+if ! curl -s --max-time 2 "http://127.0.0.1:${MGMT_PORT}/liveness" 2>/dev/null | grep -q ok; then
+  [ "$LOG_DIR_VISIBLE" = "0" ] && docker cp "$MOTOR_CONTAINER:$OUT_REAL" "$OUT" >/dev/null 2>&1 || true
+  die "coordinator 未就绪，见 $OUT"
+fi
+[ "$LOG_DIR_VISIBLE" = "0" ] && docker cp "$MOTOR_CONTAINER:$OUT_REAL" "$OUT" >/dev/null 2>&1 || true
 
 # 生成并注册引擎实例（端口/模型名来自 env）
 INST="$LOG_DIR/instances-$(date +%H%M%S).json"

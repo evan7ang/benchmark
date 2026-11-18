@@ -41,3 +41,19 @@
 --out-root <dir>         # 证据输出根
 --dry-run                # 不发请求，只校验峰值并发
 ```
+
+---
+
+## `--run-tag`（脚本绑定证据用）
+
+证据目录名默认是 `<dataset>_<arm>_<YYYYmmdd-HHMMSS>`。加 `--run-tag L2r1` 会变成
+`<dataset>_<arm>_L2r1_<ts>`。脚本优先解析收尾 JSON 的 `evidence_dir` 字段绑定本轮目录，
+`--run-tag` 作为第二重保障（并发跑轮时不会取错目录）。
+
+## churn 行（形态 C）
+
+`session_id` 以 `churn-` 开头的行是外部冷流量：
+
+- `kind=infer`，无 event 行；`agent_hint` 里**没有 `cache_control`**；
+- `--arm decl` 时它们同样带 `X-Agent-Hint`，但 header 无保护声明（`cc_raw` 为空）；
+- 它们只用于制造块淘汰压力。分析时按 `session_id` 前缀分组，p50 只看 agent 组。

@@ -99,3 +99,70 @@ agent-status 先打 mgmt（19476），404 时回落 obs（19477）；**200 才�
 - 干净引擎：池子装得下时 hint 是纯开销（+15–20 ms）；
 - 混部引擎：hint 会话相对 off 会话有 ~80% 会话级优势；
 - 不要把后者说成「hint 让场景提速 80%」。
+
+---
+
+## 15. ★ 重启引擎「看起来成功」，其实 EngineCore 没死
+
+**症状**：`02_start_engine.sh --restart` 后 banner 正常、health=200，但
+`:18220/metrics` 的 `prefix_cache_queries_total` 是百万级；两轮 off 的 Δprefill 不一致；
+甚至新引擎起不来（`Free memory on device (1.84/29.49 GiB) ... less than desired`）。
+
+**原因**：vLLM v1 会把核心进程 setproctitle 成 `VLLM::EngineCore`，
+`pkill -f 'vllm serve'` 匹配不到它；它继续持有 28 GB HBM 与 KV 池状态。
+
+**正确做法**（脚本已内置）：
+```bash
+docker exec <engine> sh -c "pkill -9 -f '[V]LLM'; pkill -9 -f '[Q]wen3-8B'"
+# 等 npu-smi info -t proc-mem -i <idx> 不再列出 Process id
+# 再起引擎；起完校验 :<engine_port>/metrics 的 queries 接近 0
+```
+
+## 16. motor obs 端口（:19477）的计数器跨引擎重启累积
+
+**症状**：引擎明明刚重启，`curl :19477/metrics` 却显示 `prefix_cache_queries_total` 上千万；
+误以为引擎没重启。
+
+**原因**：`:19477` 是 motor 侧聚合的计数器，**不随引擎重启归零**（motor 进程没动）。
+Δ（after − before）仍然有效，但**不能用它判断引擎是否新鲜**。
+
+**正确做法**：判断引擎新鲜度看引擎自身端口 `:<ENGINE_PORT>/metrics`（应接近 0）；
+`02_start_engine.sh` 已按此校验。
+
+## 17. 池子块数每轮抖动（617 / 624 / 625）
+
+**症状**：同一台机、同一启动参数，banner 的 `GPU KV cache size` 在 78,976–80,000 token
+之间变化；`pool.env` 每轮不同。
+
+**原因**：自然池大小受当轮 NPU 显存碎片影响（1–8 块差异）。
+
+**影响**：对「装得下」的判断影响很小（保护需求 568 块 vs 池子 617–625），
+但可牺牲区会在 ~49–57 块之间浮动，所以 L3 档的排队延迟会有 ±10–20 ms 抖动。
+
+**正确做法**：容量实验用 `POOL_BLOCKS_OVERRIDE` 显式钉住块数；日常实验记录实际 banner
+（`pool.env`），验收时按 V5 校验。
+
+---
+
+## 18. ★ stock motor 镜像缺两样东西：`/internal/agent-status` 与 resume 白名单
+
+**症状**：所有 `pause/finalize` 状态 POST 返回 404（`{"tried":[{"port":19476,...,"status":404},{"port":19477,...,"status":404}]}`），
+导致 `http_errors=64`、V2 FAIL；或只往推理口打 `/agent-status` 时 pause 能过、**resume 返回
+`invalid_agent_status`**（命中率腰斩，等同 11 号坑的 lane B）。
+
+**原因**：`mindie-motor-vllm:e2e3b` 镜像原版只注册 `/agent-status`（推理口），
+obs 口没有 `/internal/agent-status` 别名；且 `agent_hint.py` 的校验路径没有 `resume`。
+打了补丁的包要求 `grpcio>=1.84.1`（生成代码的版本校验），stock 是 1.84.0。
+
+**正确做法**：
+```bash
+# 从已有的补丁版容器（或自备目录）同步整个 motor 包，并升级 grpcio
+MOTOR_PATCH_SRC=longpause-motor scripts/00b_sync_motor_patch.sh
+make motor ARM=decl        # 重起 coordinator 生效
+# 自检：pause 与 resume 都应返回 applied=true
+curl -s -X POST -H 'Content-Type: application/json' \
+  -d '{"session":{"session_id":"probe","epoch":1},"agent_status":{"state":"resume"}}' \
+  http://127.0.0.1:19477/internal/agent-status
+```
+
+`00_preflight.sh` 现在会同时校验：resume 白名单、`/internal/agent-status` 路由、grpcio 版本。

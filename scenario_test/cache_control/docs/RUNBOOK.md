@@ -45,6 +45,16 @@ make data
 生成 `data/generated/contend_sp7_p60_S{1,4,8,32}.jsonl`，并自动校验 sha256（与 `scenario.json` 对齐）。
 产物不入 git。
 
+### 2.1 同步 motor 补丁包（stock 镜像必做一次）
+
+```bash
+make containers
+MOTOR_PATCH_SRC=longpause-motor scripts/00b_sync_motor_patch.sh
+make preflight     # 应显示 resume 白名单 + /internal/agent-status + grpcio>=1.84.1
+```
+
+> 只在容器重建后需要重做；`make containers` 建的是 stock 镜像，缺补丁。
+
 ## 3. 容器与引擎
 
 ```bash
@@ -69,6 +79,8 @@ hints-on 流量会把引擎进程的状态改坏（会话注册表累积 / 受�
 `reset_prefix_cache` 清不掉，**只有重启引擎进程能恢复**。所以：
 
 - **切臂必须重启引擎**：`scripts/02_start_engine.sh --restart`（`make matrix` 默认 `per_arm` 自动做）；
+- **重启必须杀干净**：`pkill -9 -f '[V]LLM'`（vLLM v1 的 `VLLM::EngineCore` 会逃过
+  `pkill 'vllm serve'`）+ 等 HBM 释放 + 校验 `:18220` 计数器≈0。`02_start_engine.sh` 已内置；
 - motor 也要容器级重启（`03_start_motor.sh` 默认 `docker restart`，`--no-restart` 可跳过）；
 - **禁止**「先 decl 再 off 且不重启引擎」——那样测到的 off 是被劣化的基线（p50 ~1 s 级），
   `07_verify.py` 的 V9 会判 FAIL。
@@ -77,8 +89,9 @@ hints-on 流量会把引擎进程的状态改坏（会话注册表累积 / 受�
 > 确认 `ttft-*` 就是本场景容器时，在 `env/env.sh` 里设 `ALLOW_SHARED_CONTAINERS=1`（实测机 profile 已带）。
 > 新机器建议用 `01_create_containers.sh` 建自己的 `cc-*` 容器、跑在空闲卡上。
 
-> 两种形态都能跑，但要分开报：干净引擎回答「hint 是加速还是开销」；
-> 混部引擎回答「hint 会话相对 off 会话的会话级优势」。见 `EXPECTED_RESULTS.md` §0。
+> 三种形态都能跑，但要分开报（见 `EXPECTED_RESULTS.md` §0）：
+> clean 回答「hint 是加速还是开销」；churn 回答「有淘汰压力时 hint 能否保住前缀」（正收益主证据）；
+> mixed 回答「生产混部形态下 hint 会话的会话级优势」（V9 预期 FAIL，仅归档）。
 
 ## 5. 起网关（臂）
 
@@ -112,17 +125,42 @@ make analyze
 make verify            # 或 scripts/07_verify.py --latest --arm decl
 ```
 
-逐条看 V1–**V9**（见 `EXPECTED_RESULTS.md`）。任何一条 FAIL ⇒ 该轮作废，不要拿来对比。
-V9 专门拦「off 轮跑在跑过 hint 的引擎实例上」——这是最隐蔽的一类废轮。
+逐条看 V1–**V11**（见 `EXPECTED_RESULTS.md` §1）。任何一条 FAIL ⇒ 该轮作废，不要拿来对比。
+- V9 拦「off 轮跑在跑过 hint 的引擎实例上」（三元组 pid+started_ts+image_id）；
+- V10 拦「churn 太弱、off 也能命中」（off 的 agent hit/pt 必须 ≤5%）；
+- V11 拦「跑了但没效果」（decl resume p50 必须 ≤0.5× 配对 off）。
 
-## 8. 跑完整对照
+## 8. 跑矩阵（三种形态）
 
 ```bash
-make matrix            # 默认 S8 × decl/off × 3 轮
-# 或在 config/scenario.json 里改 matrix；先 make matrix ARGS=--dry-run 看计划
+# 形态 A：干净引擎最小对照（S8 off/decl 各 1 轮）
+make matrix
+
+# 形态 C：正收益主证据（S8 + churn L2，off×2 / decl×2）；约 55 min
+make matrix-churn
+
+# 形态 C：三档压力扫描（L1/L2/L3 各 off/decl 1 轮）；约 2.2 h
+make matrix-churn-all
+
+# 形态 B：生产混部参考（decl 后不重启接 off；V9 预期 FAIL）；约 26 min
+make matrix-mixed
+
+# 先看计划 / 忽略容量准入
+bash scripts/05_run_matrix.sh --matrix churn --dry-run
+bash scripts/05_run_matrix.sh --matrix churn-all --force
 ```
 
-`05_run_matrix.sh` 会：校验数据 sha → 容量准入 → 每轮重启 motor → 打流 → 单轮验收。
+`05_run_matrix.sh` 会：校验数据 sha → 容量准入（churn 数据集按 **agent 会话数**算需求）
+→ 按形态决定是否重启引擎 → 每轮重启 motor → 打流 → 单轮验收（带 `--form`，启用 V9/V10/V11）。
+
+## 8.1 churn 数据集怎么来的
+
+```bash
+make data   # = gen_sp7.py --sessions 1,4,8,32 --churn-intervals-ms 2000,1000,700
+```
+
+产出 `contend_sp7churn_p60_S<N>_L{1,2,3}.jsonl`：agent 行与无 churn 版**逐字节相同**，
+另加 `churn-*` 一次性冷流量（无 `cache_control`、前缀永不重复）。详见 `data/README.md`。
 
 ## 单轮耗时与排队
 

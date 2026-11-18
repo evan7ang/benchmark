@@ -76,9 +76,21 @@ if container_exists "$MOTOR_CONTAINER"; then
   if [ -z "$ah" ]; then
     bad "找不到容器内 motor/coordinator/domain/agent_hint.py"
   elif docker exec "$MOTOR_CONTAINER" sh -c "grep -q '_AGENT_STATUS_STATES_ALLOWED' '$ah'" 2>/dev/null; then
-    ok "motor 为补丁版（状态白名单含 resume）: $ah"
+    sp=$(dirname "$(dirname "$(dirname "$(dirname "$ah")")")")
+    # 补丁包还必须带 obs 口的 /internal/agent-status 别名（stock 镜像没有）
+    if docker exec "$MOTOR_CONTAINER" sh -c "grep -q 'internal/agent-status' '$sp/motor/coordinator/api_server/observability_server.py'" 2>/dev/null; then
+      ok "motor 为补丁版（resume 白名单 + /internal/agent-status）: $ah"
+    else
+      bad "motor 补丁不全：缺 /internal/agent-status 路由（stock 镜像无此路由，状态 POST 会 404）。跑 scripts/00b_sync_motor_patch.sh"
+    fi
+    gv=$(docker exec "$MOTOR_CONTAINER" sh -c "pip show grpcio 2>/dev/null | sed -n 's/^Version: //p'" | tr -d '\r')
+    if [ -n "${gv:-}" ] && python3 -c "import sys;v='$gv'.split('.');sys.exit(0 if tuple(map(int,v[:2]))>=(1,84) else 1)" 2>/dev/null; then
+      ok "grpcio=$gv（补丁包要求 >=1.84.1）"
+    else
+      bad "grpcio=${gv:-?} 过低：补丁包生成代码要求 >=1.84.1（pip install 'grpcio>=1.84.1'）"
+    fi
   else
-    bad "motor 为镜像原版：状态白名单没有 resume ⇒ resume 会被拒（hit/pt 掉到 43-48%）。如无补丁，请自行同步含 resume 白名单的 agent_hint.py 后再跑。"
+    bad "motor 为镜像原版：状态白名单没有 resume ⇒ resume 会被拒（hit/pt 掉到 43-48%）。跑 scripts/00b_sync_motor_patch.sh"
   fi
 else
   note "motor 容器不存在（$MOTOR_CONTAINER）：先跑 scripts/01_create_containers.sh"

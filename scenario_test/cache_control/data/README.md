@@ -54,3 +54,35 @@ make data          # 等价于 python3 data/gen_sp7.py --sessions 1,4,8,32
 
 > 准入规则：`池子块数 ≥ 1.05 × 会话数 × 66`。低于这条线，hint 从「加速」变成「无效」，
 > 再低变成「拖慢」（800 块池实测 p50 1,151.9 ms、mean 1,322.0 ms，比四轮 off 都差）。
+
+---
+
+## 外部 churn 数据集（形态 C）
+
+生成：`make data`（= `gen_sp7.py --sessions 1,4,8,32 --churn-intervals-ms 2000,1000,700`）
+
+文件名：`contend_sp7churn_p60_S<N>_L<k>.jsonl`（k=1/2/3 对应 2.0/1.0/0.7 s 间隔）
+
+| 项 | 值 |
+|---|---|
+| agent 行 | 与 `contend_sp7_p60_S<N>.jsonl` **逐字节相同**（含 event 行） |
+| churn 行 | `kind=infer`、`session_id=churn-XXXX`、**无 `cache_control`**、`max_out_len=8` |
+| churn 前缀 | 从源会话长文档按偏移切片（2,700 字符、步长 400 字符），按文档去重 |
+| 唯一性 | 相邻切片首块不同（步长 > 一个 128-token 块长）⇒ 互不命中；池子用完复用也无害（旧块已被 pop） |
+| churn 时刻 | `BASE + i×interval`，铺满 600 s（覆盖 S8 的 540 s span + 收尾） |
+| 行数 | agent `16N + 8N` 中 infer 为 `8N`，churn 行 301 / 601 / 858 |
+
+**语义**：churn 只制造**块淘汰压力**，不携带保护语义——即使 decl 臂给它们发了
+`X-Agent-Hint`，header 里也没有 `cache_control`，`requests.jsonl.cc_raw` 为空。
+
+**压力不是常数**：实测每请求 ≈2,905 token ≈22.7 块（由 Δqueries 反算），
+所以三档压力为 ≈11.3 / 22.7 / 32.4 块/s。`06_analyze.py` 的 `press` 列给的是实测值，
+不要用「4,096 token/32 块」这类假设。
+
+沙箱校验（生成后应满足）：
+
+```
+L1: rows=429 agent_infer=64 churn=301 agent==S8=True churn_cc=0
+L2: rows=729 agent_infer=64 churn=601 agent==S8=True churn_cc=0
+L3: rows=986 agent_infer=64 churn=858 agent==S8=True churn_cc=0
+```

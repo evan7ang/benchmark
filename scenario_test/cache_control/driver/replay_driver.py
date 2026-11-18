@@ -703,6 +703,11 @@ def spec_of(row):
     """取一行的 spec 形态 hint（session / agent_status / prediction / spec cc）。
 
     header 通道数据集：spec 部分整体放在 row["agent_hint"]（现状，向后兼容）。
+
+    churn 行（形态 C）：session_id 以 churn- 开头、agent_hint 里**没有 cache_control**。
+    --arm decl 时它们同样会带 X-Agent-Hint，但 header 里没有保护声明（requests.jsonl
+    的 cc_raw 为空），因此不会占用保护额度；它们只制造块淘汰压力。
+
     body   通道数据集：spec 部分放在 row["agent_hint_header"]，
                        row["agent_hint"] 只留 legacy 平铺块（session_id / ttl / msg_offset）。
     读状态机与声明一律走这里，两个通道都不会错。
@@ -970,7 +975,8 @@ def do_run(args, path, rows, order, manifest):
         ports = dict(ports, obs=args.obs_port)
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    run_id = "{}_{}_{}".format(name, args.arm, stamp)
+    tag = getattr(args, "run_tag", None)
+    run_id = "{}_{}_{}{}".format(name, args.arm, (tag + "_") if tag else "", stamp)
     outdir = os.path.join(getattr(args, "out_root", None) or SHARED, run_id)
     os.makedirs(outdir, exist_ok=True)
 
@@ -1438,6 +1444,8 @@ def main():
     ap.add_argument("--timeout", type=int, default=900)
     ap.add_argument("--out-root", default=None,
                     help="证据输出根目录（默认取 AH_EVIDENCE_ROOT，再回退到包内 results/）")
+    ap.add_argument("--run-tag", default=None,
+                    help="证据目录名附加标签（如 L2r1），便于脚本精确绑定 evidence_dir")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--allow-arm-mismatch", action="store_true",
                     help="臂自检不过也照跑（只在排障时用；跑出来的证据不能用于对比）")

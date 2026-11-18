@@ -1,8 +1,29 @@
 {
   "name": "cache_control_short_pause",
-  "description": "短 pause（60s）+ agent hint（header cache_control）收益验证。每个会话 8 次调用 = 1 冷启 + 7 resume；pause 60s；prompt 8448 token = 66 块。",
+  "description": "短 pause（60s）+ agent hint（header cache_control）收益验证。每个会话 8 次调用 = 1 冷启 + 7 resume；pause 60s；prompt 8448 token = 66 块。三种形态：clean（干净引擎）/ churn（干净引擎 + 受控外部冷流量）/ mixed（同引擎先跑 hint 再跑 off）。",
+  "forms": {
+    "clean": {
+      "desc": "每臂前重启引擎；回答「hint 本身是加速还是开销」。池子装得下且无外部压力时，off 靠自然 LRU 就能命中 ⇒ hint 是纯开销。",
+      "restart": "per_arm",
+      "v9": "enforce",
+      "v10_v11": "skip"
+    },
+    "churn": {
+      "desc": "干净引擎 + 受控外部 churn（一次性冷流量，永不命中、无保护声明）。回答「共享引擎有淘汰压力时，hint 能否保住本会话前缀」。正收益的主证据形态：每轮重启引擎，两臂都可验收。",
+      "restart": "per_round",
+      "v9": "enforce",
+      "v10_v11": "enforce"
+    },
+    "mixed": {
+      "desc": "同一引擎进程先跑 decl、不重启接着跑 off（生产混部形态）。off 的基线被人为劣化，不能作为干净对照；仅作生产形态参考，不参与正收益主结论。",
+      "restart": "never",
+      "v9": "expected_fail",
+      "v10_v11": "skip"
+    }
+  },
   "dataset": {
     "prefix": "contend_sp7_p60",
+    "churn_prefix": "contend_sp7churn_p60",
     "source": "data/source/contend_lru60_S32.jsonl",
     "generated_dir": "data/generated",
     "sessions_allowed": [
@@ -22,32 +43,138 @@
       "contend_sp7_p60_S1.jsonl": "8efda7a7ce9a6f883dd6d5bab9af17f3845bd81e009ab414a9b22260e5ae1346",
       "contend_sp7_p60_S4.jsonl": "039eabcb4859e6317c4329fb5dc5e3ba51d36d613145b2a82976184942f8c292",
       "contend_sp7_p60_S8.jsonl": "d509d4332ccc2fb9ead09b0d2b12b03ca178bccaf50422c6a14cfc0507b9d549",
-      "contend_sp7_p60_S32.jsonl": "994336a53213f74fbb1450695eeb45eb11e18b21b0b89fedccbd01be0cee7d9f"
+      "contend_sp7_p60_S32.jsonl": "994336a53213f74fbb1450695eeb45eb11e18b21b0b89fedccbd01be0cee7d9f",
+      "contend_sp7churn_p60_S8_L1.jsonl": "b15b0ac6fe63ebe3249117b7df03f33de2667a1c4982dc345a7dffa455cc288c",
+      "contend_sp7churn_p60_S8_L2.jsonl": "acad6b0920107e9ca4c77c75d19fa15cb63bc59723a3f499565b134324483ccc",
+      "contend_sp7churn_p60_S8_L3.jsonl": "93661d6138c3b73ddfef5ade84b92d72fa380c2d4e93df7abfc652a00838841c"
+    },
+    "churn": {
+      "comment": "外部 churn = 一次性冷流量，前缀按偏移切片保证永不命中；无 cache_control ⇒ 不占保护额度。压力由「每请求实耗 token」反算，不写死。",
+      "span_ms": 600000,
+      "chars_per_request": 2700,
+      "out_len": 8,
+      "tiers": {
+        "L1": {
+          "interval_ms": 2000,
+          "expected_churn_requests": 301,
+          "expected_pressure_blocks_s": 11.3
+        },
+        "L2": {
+          "interval_ms": 1000,
+          "expected_churn_requests": 601,
+          "expected_pressure_blocks_s": 22.7
+        },
+        "L3": {
+          "interval_ms": 700,
+          "expected_churn_requests": 858,
+          "expected_pressure_blocks_s": 32.4
+        }
+      }
     }
   },
   "capacity_admission": {
-    "rule": "pool_blocks >= 1.05 * sessions * blocks_per_session",
+    "rule": "pool_blocks >= 1.05 * agent_sessions * blocks_per_session",
     "pool_blocks": null,
-    "comment": "pool_blocks=null 时由 02_start_engine.sh 从引擎 banner 读取并写入 results/logs/pool.env"
+    "comment": "churn 数据集的会话需求只按 agent 会话算（churn 行是一次性流量，不构成保护需求）。pool_blocks=null 时由 02_start_engine.sh 从引擎 banner 读取并写入 results/logs/pool.env"
+  },
+  "analysis": {
+    "agent_session_prefix": [
+      "lru"
+    ],
+    "churn_session_prefix": "churn-",
+    "identity_tolerance_bp": 25,
+    "warmup_hits": 16640,
+    "comment": "分组统计：p50/mean/le500/cold/resume 只看 agent 组；churn 组单独报（压力源健康度）。identity_tolerance_bp：churn 场景下 |Δhits+Δprefill-Δqueries| ≤ 0.25%×Δqueries（采样边界竞态），非 churn 仍要求精确。"
   },
   "matrix": [
     {
-      "dataset": "contend_sp7_p60_S8.jsonl",
-      "arm": "decl",
-      "repeat": 3
-    },
-    {
+      "form": "clean",
       "dataset": "contend_sp7_p60_S8.jsonl",
       "arm": "off",
-      "repeat": 3
+      "repeat": 1
+    },
+    {
+      "form": "clean",
+      "dataset": "contend_sp7_p60_S8.jsonl",
+      "arm": "decl",
+      "repeat": 1
+    }
+  ],
+  "matrix_churn": [
+    {
+      "form": "churn",
+      "dataset": "contend_sp7churn_p60_S8_L2.jsonl",
+      "arm": "off",
+      "repeat": 2
+    },
+    {
+      "form": "churn",
+      "dataset": "contend_sp7churn_p60_S8_L2.jsonl",
+      "arm": "decl",
+      "repeat": 2
+    }
+  ],
+  "matrix_churn_all": [
+    {
+      "form": "churn",
+      "dataset": "contend_sp7churn_p60_S8_L1.jsonl",
+      "arm": "off",
+      "repeat": 1
+    },
+    {
+      "form": "churn",
+      "dataset": "contend_sp7churn_p60_S8_L1.jsonl",
+      "arm": "decl",
+      "repeat": 1
+    },
+    {
+      "form": "churn",
+      "dataset": "contend_sp7churn_p60_S8_L2.jsonl",
+      "arm": "off",
+      "repeat": 1
+    },
+    {
+      "form": "churn",
+      "dataset": "contend_sp7churn_p60_S8_L2.jsonl",
+      "arm": "decl",
+      "repeat": 1
+    },
+    {
+      "form": "churn",
+      "dataset": "contend_sp7churn_p60_S8_L3.jsonl",
+      "arm": "off",
+      "repeat": 1
+    },
+    {
+      "form": "churn",
+      "dataset": "contend_sp7churn_p60_S8_L3.jsonl",
+      "arm": "decl",
+      "repeat": 1
+    }
+  ],
+  "matrix_mixed": [
+    {
+      "form": "mixed",
+      "dataset": "contend_sp7_p60_S8.jsonl",
+      "arm": "decl",
+      "repeat": 1
+    },
+    {
+      "form": "mixed",
+      "dataset": "contend_sp7_p60_S8.jsonl",
+      "arm": "off",
+      "repeat": 1
     }
   ],
   "matrix_notes": {
-    "S8": "32GB 卡（3.2）上的正收益点：需求 8x66=528 块，比值 0.85",
-    "S32": "64GB 卡（169）上的正收益点：需求 2112 块，池子 2031 块，比值 1.04",
-    "S1": "反常点（hint 反向劣化），只用于边界验证，不纳入日常矩阵"
+    "clean": "形态 A：干净引擎基线。装得下且无外部压力时 off 也能命中 ⇒ decl 是纯开销。",
+    "churn": "形态 C：正收益主证据。L2（≈22.7 块/s）是推荐工作点；churn×pause ≫ 可牺牲区 ⇒ off 必丢、decl 受保护。",
+    "mixed": "形态 B：生产混部参考。decl 后不重启直接 off，off 基线被劣化（V9 预期 FAIL），只作会话级优势的参考。",
+    "S1": "反常点（hint 反向劣化），只用于边界验证，不纳入日常矩阵",
+    "169_S32": "64GB 卡容量边界点：需求 2112 / 池 2031 = 1.04，靠容量而非外部 churn 让 off 丢前缀"
   },
   "acceptance": {
+    "comment": "唯一事实源：07_verify.py 直接读取本段。form 相关开关见 forms.*。",
     "V1_arm_selfcheck": true,
     "V2_http_errors_zero": true,
     "V3_hint_sent_matches_arm": true,
@@ -56,11 +183,15 @@
     "V6_coordinator_pid_stable": true,
     "V7_identity_hits_plus_prefill_eq_queries": true,
     "V8_reuse_blocks_sane": true,
+    "V9_off_baseline_clean": true,
+    "V10_pressure_effective": true,
+    "V11_benefit_realized": true,
     "half_threshold": "le500 >= 50% of infer requests  <=>  p50 <= 500ms"
   },
   "isolation": {
-    "engine_restart": "per_arm",
-    "comment": "切臂必须重启引擎进程：hints-on 流量会污染引擎状态（会话注册表累积/受保护块占窗口/空闲计数虚高），reset_prefix_cache 清不掉，只有重启进程能恢复。per_arm=换臂重启；per_round=每轮重启（最严）；never=只在单臂内连续跑时可用。off 轮若发现同引擎有 hint 历史会自动强制重启。"
+    "engine_restart": "per_form",
+    "comment": "干净/ churn 形态：切臂与每轮都重启引擎（per_round 更严）；mixed 形态：刻意不重启（生产混部）。off 轮若发现同引擎有 hint 历史，clean/churn 会自动强制重启。污染原因：会话注册表累积/受保护块占窗口/空闲计数虚高，reset_prefix_cache 清不掉，只有重启进程能恢复。",
+    "engine_restart_note": "重启必须 SIGKILL 所有 VLLM 进程（含 setproctitle 改名后的 VLLM::EngineCore）并等待 HBM 释放，见 docs/TROUBLESHOOTING.md"
   },
   "expected": {
     "clean_engine": {
@@ -68,13 +199,13 @@
       "S8_624blk": {
         "off_p50_ms": [
           186,
-          200
+          202
         ],
         "decl_p50_ms": [
           200,
           222
         ],
-        "note": "hint 是纯开销（+15~20ms）；off 靠自然 LRU 就能活过 60s pause"
+        "note": "hint 是纯开销（+15~24ms）；off 靠自然 LRU 就能活过 60s pause（hit/pt ~86%）"
       },
       "S4_624blk": {
         "off_p50_ms": [
@@ -107,6 +238,54 @@
           413
         ],
         "note": "169 每轮重启引擎；2,112 需求 vs 2,031 池，off 因容量丢失前缀"
+      }
+    },
+    "churn_engine": {
+      "comment": "干净引擎 + 受控外部冷流量（agent 8 会话 + churn 行）。主结论形态：p50 只看 agent 组。",
+      "L1_11p3_blk_s": {
+        "off_agent_p50_ms": [
+          1090,
+          1105
+        ],
+        "decl_agent_p50_ms": [
+          225,
+          245
+        ],
+        "decl_reuse_blocks": [
+          3400,
+          3560
+        ],
+        "note": "预测：off 崩（块被挤）、decl 保（复用块≈3,554/3,696=96%）"
+      },
+      "L2_22p7_blk_s": {
+        "off_agent_p50_ms": [
+          1160,
+          1200
+        ],
+        "decl_agent_p50_ms": [
+          210,
+          240
+        ],
+        "decl_reuse_blocks": [
+          3400,
+          3560
+        ],
+        "note": "推荐工作点；本轮实测 off 1,174 / decl 218–233（−80.8%）"
+      },
+      "L3_32p4_blk_s": {
+        "off_agent_p50_ms": [
+          1210,
+          1240
+        ],
+        "decl_agent_p50_ms": [
+          270,
+          295
+        ],
+        "decl_reuse_blocks": [
+          3400,
+          3560
+        ],
+        "note": "余量压缩到 ~1.2 倍：decl 延迟略升（排队），但 Δhits 与低档完全一致 ⇒ 保护未破"
       }
     },
     "polluted_engine": {
