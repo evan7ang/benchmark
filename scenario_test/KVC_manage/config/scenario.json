@@ -1,0 +1,62 @@
+{
+  "name": "KVC_manage_long_pause",
+  "status": "reference_results",
+  "arms": {
+    "off": "KVC lifecycle off / no agent hint / no offload / no prefetch",
+    "on": "KVC lifecycle on / agent hint + cache_control / pause->offload / resume->prefetch"
+  },
+  "topology": {
+    "engine": "Union single engine",
+    "model": "Qwen3-8B",
+    "tensor_parallel_size": 2,
+    "npu_devices": "0,1",
+    "pool_blocks": 1600,
+    "engine_port": 18220
+  },
+  "dataset": {
+    "name": "lpstd_large_v16_a4x16.jsonl",
+    "rows": 132,
+    "victims": 16,
+    "attacker_sessions": 4,
+    "attacker_infer": 64,
+    "pause_s": 180,
+    "ttl_s": 600,
+    "victim_blocks": 1056,
+    "attacker_blocks": 4224,
+    "scheduling": "delay_after_ms; AISBench use_timestamp=False",
+    "md5": "6529aa377d41f6af9da5a23f8dc23e82"
+  },
+  "metrics": {
+    "primary": "overall mean TTFT",
+    "secondary": [
+      "overall p50 (context)",
+      "victim resume TTFT",
+      "victim resume hit blocks/rate",
+      "attacker p50"
+    ],
+    "overall_definition": "all AISBench requests in the run",
+    "overall_inference_definition": "cold + resume + attacker, excludes pause/finalize"
+  },
+  "result": {
+    "off": {
+      "overall_mean_ms": 2442.5,
+      "overall_p50_ms": 1139.8,
+      "victim_resume_p50_ms": 5010.7,
+      "attacker_p50_ms": 1140.8,
+      "prefix_hits": 267264,
+      "prefix_queries": 1076954
+    },
+    "on": {
+      "overall_mean_ms": 1800.1,
+      "overall_p50_ms": 1083.0,
+      "victim_resume_p50_ms": 272.9,
+      "attacker_p50_ms": 1166.5,
+      "prefix_hits": 400384,
+      "prefix_queries": 1076954,
+      "victim_hit_blocks": 65,
+      "victim_hit_rate": 0.984
+    },
+    "overall_mean_change": -0.263,
+    "victim_resume_p50_change": -0.946
+  }
+}

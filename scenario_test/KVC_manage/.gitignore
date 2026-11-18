@@ -1,0 +1,6 @@
+env/env.sh
+.env
+results/*
+!results/README.md
+data/generated/*.tmp
+__pycache__/
