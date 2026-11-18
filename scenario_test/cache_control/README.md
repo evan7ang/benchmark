@@ -130,6 +130,11 @@ churn 数据集 = agent 行（与无 churn 版**逐字节相同**）+ 一次性�
 
 ## churn 形态怎么判读（拿到结果先看这几列）
 
+> **口径铁律**：churn 形态的收益结论**只引用 agent 组**（`agP50/agMean/le500/cold/resume`）。
+> `allP50/allMean` 是全体请求（含 churn），churn 占 ~90% 且两臂行为相近，会稀释效应——
+> 实测同一轮：**agent −82.2%（1186→212），全体仅 −4.7%（356→339）**。
+> 对外只报 agent 组；需要提全体时必须注明「含背景流量，不可用作结论」。
+
 `make analyze` 的输出里：
 
 - `agP50` / `agMean` / `le500`：**agent 组**（收益看这个，churn 组不参与）

@@ -84,7 +84,9 @@
     "churn_session_prefix": "churn-",
     "identity_tolerance_bp": 25,
     "warmup_hits": 16640,
-    "comment": "分组统计：p50/mean/le500/cold/resume 只看 agent 组；churn 组单独报（压力源健康度）。identity_tolerance_bp：churn 场景下 |Δhits+Δprefill-Δqueries| ≤ 0.25%×Δqueries（采样边界竞态），非 churn 仍要求精确。"
+    "comment": "分组统计：p50/mean/le500/cold/resume 只看 agent 组；churn 组单独报（压力源健康度）。identity_tolerance_bp：churn 场景下 |Δhits+Δprefill-Δqueries| ≤ 0.25%×Δqueries（采样边界竞态），非 churn 仍要求精确。",
+    "p50_group": "agent",
+    "report_rule": "churn 形态的收益结论只引用 agent 组指标（agP50/agMean/le500/cold/resume）；allP50 仅作对照，因 churn 占 ~90% 请求会稀释效应。"
   },
   "matrix": [
     {

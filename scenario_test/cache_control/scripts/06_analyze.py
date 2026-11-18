@@ -19,6 +19,11 @@
              非 churn：  (Δhits - 16640) / 128
   省算       1 - Δprefill / 同数据集 off 轮的 Δprefill 中位数（无则退回内置常量，标注来源）
   压力       churn 形态：(Σ churn prompt_tokens / 128) / span_s  块/秒
+
+口径警告（churn 形态）：
+  收益结论只看 **agent 组**（agP50 / agMean / le500 / cold / resume）。
+  allP50 / allMean 是**全体请求**（含 churn）——churn 占 ~90% 且两臂行为相近，
+  会把效应稀释掉（实测 agent −82% 而全体仅 −4.7%），不可用作结论口径。
 """
 import argparse
 import glob
@@ -69,6 +74,7 @@ def analyze(run_dir, churn_prefix="churn-", tol_bp=25):
 
     ag = ttfts(agent)
     ch = ttfts(churn)
+    allv = ttfts(infer)
     cold = ttfts([r for r in agent if r.get("call_index") == 1])
     res = ttfts([r for r in agent if (r.get("call_index") or 0) >= 2])
     sp_agent = sum(r.get("prompt_tokens") or 0 for r in agent)
@@ -118,8 +124,9 @@ def analyze(run_dir, churn_prefix="churn-", tol_bp=25):
         "dataset": ds_name,
         "sessions": sessions,
         "has_churn": has_churn,
-        "n": len(ag), "churn_n": len(ch),
+        "n": len(ag), "churn_n": len(ch), "all_n": len(allv),
         "p50": med(ag), "mean": statistics.mean(ag) if ag else None,
+        "all_p50": med(allv), "all_mean": statistics.mean(allv) if allv else None,
         "le400": sum(1 for t in ag if t <= 400),
         "le500": sum(1 for t in ag if t <= 500),
         "cold_p50": med(cold), "resume_p50": med(res),
@@ -194,10 +201,10 @@ def main(argv=None):
     else:
         out.sort(key=lambda x: x["run"])
 
-    hdr = ("run", "form", "arm", "lane", "S", "agN", "chN", "agP50", "agMean", "le500",
-           "cold50", "res50", "churn50", "dHits", "dPrefill", "ident", "hit/pt", "cached",
-           "reuse", "saved", "press", "errs", "sc", "base")
-    widths = (52, 6, 5, 4, 3, 4, 4, 8, 8, 5, 8, 8, 8, 9, 10, 11, 7, 7, 7, 7, 6, 4, 3, 9)
+    hdr = ("run", "form", "arm", "lane", "S", "agN", "chN", "agP50", "allP50", "agMean",
+           "allMean", "le500", "cold50", "res50", "churn50", "dHits", "dPrefill", "ident",
+           "hit/pt", "cached", "reuse", "saved", "press", "errs", "sc", "base")
+    widths = (52, 6, 5, 4, 3, 4, 4, 8, 8, 8, 8, 5, 8, 8, 8, 9, 10, 11, 7, 7, 7, 7, 6, 4, 3, 9)
     line = "".join(h.ljust(w) for h, w in zip(hdr, widths))
     print(line)
     print("-" * len(line))
@@ -206,7 +213,8 @@ def main(argv=None):
         if x["identity_delta"] not in (None, 0):
             ident = "%s(%+d)" % (ident, x["identity_delta"])
         vals = [x["run"], fmt(x["form"]), fmt(x["arm"]), fmt(x["lane"]), fmt(x["sessions"]),
-                fmt(x["n"]), fmt(x["churn_n"]), fmt(x["p50"]), fmt(x["mean"]), fmt(x["le500"]),
+                fmt(x["n"]), fmt(x["churn_n"]), fmt(x["p50"]), fmt(x["all_p50"]),
+                fmt(x["mean"]), fmt(x["all_mean"]), fmt(x["le500"]),
                 fmt(x["cold_p50"]), fmt(x["resume_p50"]), fmt(x["churn_p50"]),
                 fmt(x["dH"], 0), fmt(x["dP"], 0), ident,
                 fmt(x["hit_pt"]) + ("%" if x["hit_pt"] is not None else ""),

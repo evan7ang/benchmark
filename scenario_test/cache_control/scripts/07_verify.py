@@ -256,6 +256,8 @@ def verify(run_dir, cfg, form=None, pool_env=None, epoch=None, data_counts=None)
                    "_pending": True})
 
     p50 = med(ag_ttft)
+    all_ttft = [r["ttft_ms"] for r in infer if r.get("ttft_ms") is not None]
+    all_p50 = med(all_ttft)
     le500 = sum(1 for t in ag_ttft if t <= 500)
     ratio = (le500 / len(ag_ttft)) if ag_ttft else None
     hot = (p50 is not None and p50 <= 500)
@@ -267,8 +269,11 @@ def verify(run_dir, cfg, form=None, pool_env=None, epoch=None, data_counts=None)
         "p50": p50, "le500": le500, "resume_p50": med(res_ttft),
         "dataset": os.path.basename(str(meta.get("dataset") or "")),
         "half_ok": half_ok,
-        "half_detail": "le500=%d/%d(%.0f%%) p50=%s" % (
-            le500, len(ag_ttft), 100 * (ratio or 0), ("%.1f" % p50) if p50 is not None else "-"),
+        "all_p50": all_p50,
+        "half_detail": "le500=%d/%d(%.0f%%) p50_agent=%s p50_all=%s" % (
+            le500, len(ag_ttft), 100 * (ratio or 0),
+            ("%.1f" % p50) if p50 is not None else "-",
+            ("%.1f" % all_p50) if all_p50 is not None else "-"),
         "checks": checks,
         "need_v10v11": need_v10v11,
         "pass": all(c["ok"] for c in checks),
